@@ -145,6 +145,35 @@ test("drops unknown legacy tui keys during migration", async () => {
   })
 })
 
+test("skips migration when opencode.jsonc is syntactically invalid", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.jsonc"),
+        `{
+  "theme": "broken-theme",
+  "tui": { "scroll_speed": 2 }
+  "username": "still-broken"
+}`,
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const config = await TuiConfig.get()
+      expect(config.theme).toBeUndefined()
+      expect(config.scroll_speed).toBeUndefined()
+      expect(await Filesystem.exists(path.join(tmp.path, "tui.json"))).toBe(false)
+      expect(await Filesystem.exists(path.join(tmp.path, "opencode.jsonc.tui-migration.bak"))).toBe(false)
+      const source = await Filesystem.readText(path.join(tmp.path, "opencode.jsonc"))
+      expect(source).toContain('"theme": "broken-theme"')
+      expect(source).toContain('"tui": { "scroll_speed": 2 }')
+    },
+  })
+})
+
 test("skips migration when tui.json already exists", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
