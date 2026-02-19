@@ -66,7 +66,7 @@ export namespace TuiConfig {
       }
     }
 
-    result.keybinds ??= Config.Keybinds.parse({})
+    result.keybinds = Config.Keybinds.parse(result.keybinds ?? {})
 
     return {
       config: result,
