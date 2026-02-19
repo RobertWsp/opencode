@@ -292,7 +292,7 @@ test("top-level keys in tui.json take precedence over nested tui key", async () 
   })
 })
 
-test("OPENCODE_TUI_CONFIG takes precedence over project config", async () => {
+test("project config takes precedence over OPENCODE_TUI_CONFIG (matches OPENCODE_CONFIG)", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(path.join(dir, "tui.json"), JSON.stringify({ theme: "project", diff_style: "auto" }))
@@ -306,9 +306,9 @@ test("OPENCODE_TUI_CONFIG takes precedence over project config", async () => {
     directory: tmp.path,
     fn: async () => {
       const config = await TuiConfig.get()
-      // project tui.json overrides the custom path (higher precedence)
+      // project tui.json overrides the custom path, same as server config precedence
       expect(config.theme).toBe("project")
-      // but project also set diff_style, so that wins
+      // project also set diff_style, so that wins
       expect(config.diff_style).toBe("auto")
     },
   })
