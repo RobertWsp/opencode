@@ -1,5 +1,5 @@
 import path from "path"
-import { applyEdits, modify, parse as parseJsonc } from "jsonc-parser"
+import { type ParseError as JsoncParseError, applyEdits, modify, parse as parseJsonc } from "jsonc-parser"
 import { unique } from "remeda"
 import z from "zod"
 import { ConfigPaths } from "./paths"
@@ -44,8 +44,9 @@ export async function migrateTuiConfig(input: MigrateInput) {
       return undefined
     })
     if (!source) continue
-    const data = parseJsonc(source)
-    if (!data || typeof data !== "object" || Array.isArray(data)) continue
+    const errors: JsoncParseError[] = []
+    const data = parseJsonc(source, errors, { allowTrailingComma: true })
+    if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) continue
 
     const theme = LegacyTheme.safeParse("theme" in data ? data.theme : undefined)
     const keybinds = LegacyRecord.safeParse("keybinds" in data ? data.keybinds : undefined)

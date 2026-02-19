@@ -71,8 +71,18 @@ export namespace ConfigPaths {
     })
   }
 
+  type ParseSource = string | { source: string; dir: string }
+
+  function source(input: ParseSource) {
+    return typeof input === "string" ? input : input.source
+  }
+
+  function dir(input: ParseSource) {
+    return typeof input === "string" ? path.dirname(input) : input.dir
+  }
+
   /** Apply {env:VAR} and {file:path} substitutions to config text. */
-  async function substitute(text: string, configFilepath: string, missing: "error" | "empty" = "error") {
+  async function substitute(text: string, input: ParseSource, missing: "error" | "empty" = "error") {
     text = text.replace(/\{env:([^}]+)\}/g, (_, varName) => {
       return process.env[varName] || ""
     })
@@ -80,7 +90,8 @@ export namespace ConfigPaths {
     const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
     if (!fileMatches.length) return text
 
-    const configDir = path.dirname(configFilepath)
+    const configDir = dir(input)
+    const configSource = source(input)
     let out = ""
     let cursor = 0
 
@@ -111,13 +122,13 @@ export namespace ConfigPaths {
           if (error.code === "ENOENT") {
             throw new InvalidError(
               {
-                path: configFilepath,
+                path: configSource,
                 message: errMsg + ` ${resolvedPath} does not exist`,
               },
               { cause: error },
             )
           }
-          throw new InvalidError({ path: configFilepath, message: errMsg }, { cause: error })
+          throw new InvalidError({ path: configSource, message: errMsg }, { cause: error })
         })
       ).trim()
 
@@ -130,8 +141,9 @@ export namespace ConfigPaths {
   }
 
   /** Substitute and parse JSONC text, throwing JsonError on syntax errors. */
-  export async function parseText(text: string, configFilepath: string, missing: "error" | "empty" = "error") {
-    text = await substitute(text, configFilepath, missing)
+  export async function parseText(text: string, input: ParseSource, missing: "error" | "empty" = "error") {
+    const configSource = source(input)
+    text = await substitute(text, input, missing)
 
     const errors: JsoncParseError[] = []
     const data = parseJsonc(text, errors, { allowTrailingComma: true })
@@ -152,7 +164,7 @@ export namespace ConfigPaths {
         .join("\n")
 
       throw new JsonError({
-        path: configFilepath,
+        path: configSource,
         message: `\n--- JSONC Input ---\n${text}\n--- Errors ---\n${errorDetails}\n--- End ---`,
       })
     }
