@@ -384,6 +384,29 @@ test("applies env and file substitutions in tui.json", async () => {
   }
 })
 
+test("applies file substitutions when first identical token is in a commented line", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(path.join(dir, "theme.txt"), "resolved-theme")
+      await Bun.write(
+        path.join(dir, "tui.jsonc"),
+        `{
+  // "theme": "{file:theme.txt}",
+  "theme": "{file:theme.txt}"
+}`,
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const config = await TuiConfig.get()
+      expect(config.theme).toBe("resolved-theme")
+    },
+  })
+})
+
 test("loads managed tui config and gives it highest precedence", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
