@@ -5,6 +5,7 @@ import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { TuiConfig } from "../../src/config/tui"
 import { Global } from "../../src/global"
+import { Filesystem } from "../../src/util/filesystem"
 
 const managedConfigDir = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR!
 
@@ -64,17 +65,17 @@ test("migrates tui-specific keys from opencode.json when tui.json does not exist
       expect(config.theme).toBe("migrated-theme")
       expect(config.scroll_speed).toBe(5)
       expect(config.keybinds?.app_exit).toBe("ctrl+q")
-      const text = await Bun.file(path.join(tmp.path, "tui.json")).text()
+      const text = await Filesystem.readText(path.join(tmp.path, "tui.json"))
       expect(JSON.parse(text)).toMatchObject({
         theme: "migrated-theme",
         scroll_speed: 5,
       })
-      const server = JSON.parse(await Bun.file(path.join(tmp.path, "opencode.json")).text())
+      const server = JSON.parse(await Filesystem.readText(path.join(tmp.path, "opencode.json")))
       expect(server.theme).toBeUndefined()
       expect(server.keybinds).toBeUndefined()
       expect(server.tui).toBeUndefined()
-      expect(await Bun.file(path.join(tmp.path, "opencode.json.tui-migration.bak")).exists()).toBe(true)
-      expect(await Bun.file(path.join(tmp.path, "tui.json")).exists()).toBe(true)
+      expect(await Filesystem.exists(path.join(tmp.path, "opencode.json.tui-migration.bak"))).toBe(true)
+      expect(await Filesystem.exists(path.join(tmp.path, "tui.json"))).toBe(true)
     },
   })
 })
@@ -103,9 +104,9 @@ test("migrates project legacy tui keys even when global tui.json already exists"
       const config = await TuiConfig.get()
       expect(config.theme).toBe("project-migrated")
       expect(config.scroll_speed).toBe(2)
-      expect(await Bun.file(path.join(tmp.path, "tui.json")).exists()).toBe(true)
+      expect(await Filesystem.exists(path.join(tmp.path, "tui.json"))).toBe(true)
 
-      const server = JSON.parse(await Bun.file(path.join(tmp.path, "opencode.json")).text())
+      const server = JSON.parse(await Filesystem.readText(path.join(tmp.path, "opencode.json")))
       expect(server.theme).toBeUndefined()
       expect(server.tui).toBeUndefined()
     },
@@ -136,7 +137,7 @@ test("drops unknown legacy tui keys during migration", async () => {
       expect(config.theme).toBe("migrated-theme")
       expect(config.scroll_speed).toBe(2)
 
-      const text = await Bun.file(path.join(tmp.path, "tui.json")).text()
+      const text = await Filesystem.readText(path.join(tmp.path, "tui.json"))
       const migrated = JSON.parse(text)
       expect(migrated.scroll_speed).toBe(2)
       expect(migrated.foo).toBeUndefined()
@@ -159,9 +160,9 @@ test("skips migration when tui.json already exists", async () => {
       expect(config.diff_style).toBe("stacked")
       expect(config.theme).toBeUndefined()
 
-      const server = JSON.parse(await Bun.file(path.join(tmp.path, "opencode.json")).text())
+      const server = JSON.parse(await Filesystem.readText(path.join(tmp.path, "opencode.json")))
       expect(server.theme).toBe("legacy")
-      expect(await Bun.file(path.join(tmp.path, "opencode.json.tui-migration.bak")).exists()).toBe(false)
+      expect(await Filesystem.exists(path.join(tmp.path, "opencode.json.tui-migration.bak"))).toBe(false)
     },
   })
 })
@@ -182,9 +183,9 @@ test("continues loading tui config when legacy source cannot be stripped", async
       fn: async () => {
         const config = await TuiConfig.get()
         expect(config.theme).toBe("readonly-theme")
-        expect(await Bun.file(path.join(tmp.path, "tui.json")).exists()).toBe(true)
+        expect(await Filesystem.exists(path.join(tmp.path, "tui.json"))).toBe(true)
 
-        const server = JSON.parse(await Bun.file(source).text())
+        const server = JSON.parse(await Filesystem.readText(source))
         expect(server.theme).toBe("readonly-theme")
       },
     })
@@ -214,7 +215,7 @@ test("migration backup preserves JSONC comments", async () => {
     directory: tmp.path,
     fn: async () => {
       await TuiConfig.get()
-      const backup = await Bun.file(path.join(tmp.path, "opencode.jsonc.tui-migration.bak")).text()
+      const backup = await Filesystem.readText(path.join(tmp.path, "opencode.jsonc.tui-migration.bak"))
       expect(backup).toContain("// top-level comment")
       expect(backup).toContain("// nested comment")
       expect(backup).toContain('"theme": "jsonc-theme"')
@@ -238,8 +239,8 @@ test("migrates legacy tui keys across multiple opencode.json levels", async () =
     fn: async () => {
       const config = await TuiConfig.get()
       expect(config.theme).toBe("nested-theme")
-      expect(await Bun.file(path.join(tmp.path, "tui.json")).exists()).toBe(true)
-      expect(await Bun.file(path.join(tmp.path, "apps", "client", "tui.json")).exists()).toBe(true)
+      expect(await Filesystem.exists(path.join(tmp.path, "tui.json"))).toBe(true)
+      expect(await Filesystem.exists(path.join(tmp.path, "apps", "client", "tui.json"))).toBe(true)
     },
   })
 })

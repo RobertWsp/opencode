@@ -7,6 +7,7 @@ import { TuiInfo, TuiOptions } from "./tui-schema"
 import { Instance } from "@/project/instance"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
+import { Filesystem } from "@/util/filesystem"
 import { Global } from "@/global"
 
 const log = Log.create({ service: "tui.migrate" })
@@ -38,12 +39,10 @@ interface MigrateInput {
 export async function migrateTuiConfig(input: MigrateInput) {
   const opencode = await opencodeFiles(input)
   for (const file of opencode) {
-    const source = await Bun.file(file)
-      .text()
-      .catch((error) => {
-        log.warn("failed to read config for tui migration", { path: file, error })
-        return undefined
-      })
+    const source = await Filesystem.readText(file).catch((error) => {
+      log.warn("failed to read config for tui migration", { path: file, error })
+      return undefined
+    })
     if (!source) continue
     const data = parseJsonc(source)
     if (!data || typeof data !== "object" || Array.isArray(data)) continue
@@ -60,7 +59,7 @@ export async function migrateTuiConfig(input: MigrateInput) {
     if (extracted.theme === undefined && extracted.keybinds === undefined && !tui) continue
 
     const target = path.join(path.dirname(file), "tui.json")
-    const targetExists = await Bun.file(target).exists()
+    const targetExists = await Filesystem.exists(target)
     if (targetExists) continue
 
     const payload: Record<string, unknown> = {
@@ -101,7 +100,7 @@ function normalizeTui(data: Record<string, unknown>) {
 
 async function backupAndStripLegacy(file: string, source: string) {
   const backup = file + ".tui-migration.bak"
-  const hasBackup = await Bun.file(backup).exists()
+  const hasBackup = await Filesystem.exists(backup)
   const backed = hasBackup
     ? true
     : await Bun.write(backup, source)
@@ -147,7 +146,7 @@ async function opencodeFiles(input: { directories: string[]; managed: string }) 
 
   const existing = await Promise.all(
     unique(files).map(async (file) => {
-      const ok = await Bun.file(file).exists()
+      const ok = await Filesystem.exists(file)
       return ok ? file : undefined
     }),
   )

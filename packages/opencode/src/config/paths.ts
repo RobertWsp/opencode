@@ -104,23 +104,21 @@ export namespace ConfigPaths {
 
       const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath)
       const fileContent = (
-        await Bun.file(resolvedPath)
-          .text()
-          .catch((error) => {
-            if (missing === "empty") return ""
+        await Filesystem.readText(resolvedPath).catch((error: NodeJS.ErrnoException) => {
+          if (missing === "empty") return ""
 
-            const errMsg = `bad file reference: "${token}"`
-            if (error.code === "ENOENT") {
-              throw new InvalidError(
-                {
-                  path: configFilepath,
-                  message: errMsg + ` ${resolvedPath} does not exist`,
-                },
-                { cause: error },
-              )
-            }
-            throw new InvalidError({ path: configFilepath, message: errMsg }, { cause: error })
-          })
+          const errMsg = `bad file reference: "${token}"`
+          if (error.code === "ENOENT") {
+            throw new InvalidError(
+              {
+                path: configFilepath,
+                message: errMsg + ` ${resolvedPath} does not exist`,
+              },
+              { cause: error },
+            )
+          }
+          throw new InvalidError({ path: configFilepath, message: errMsg }, { cause: error })
+        })
       ).trim()
 
       out += JSON.stringify(fileContent).slice(1, -1)
