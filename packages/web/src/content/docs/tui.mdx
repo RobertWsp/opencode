@@ -379,7 +379,7 @@ This is separate from `opencode.json`, which configures server/runtime behavior.
 - `theme` - Sets your UI theme. [Learn more](/docs/themes).
 - `keybinds` - Customizes keyboard shortcuts. [Learn more](/docs/keybinds).
 - `scroll_acceleration.enabled` - Enable macOS-style scroll acceleration for smooth, natural scrolling. When enabled, scroll speed increases with rapid scrolling gestures and stays precise for slower movements. **This setting takes precedence over `scroll_speed` and overrides it when enabled.**
-- `scroll_speed` - Controls how fast the TUI scrolls when using scroll commands (minimum: `1`). Defaults to `3`. **Note: This is ignored if `scroll_acceleration.enabled` is set to `true`.**
+- `scroll_speed` - Controls how fast the TUI scrolls when using scroll commands (minimum: `0.001`, supports decimal values). Defaults to `3`. **Note: This is ignored if `scroll_acceleration.enabled` is set to `true`.**
 - `diff_style` - Controls diff rendering. `"auto"` adapts to terminal width, `"stacked"` always shows a single-column layout.
 
 Use `OPENCODE_TUI_CONFIG` to load a custom TUI config path.
