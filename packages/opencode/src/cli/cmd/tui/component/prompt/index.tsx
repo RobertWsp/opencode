@@ -3,6 +3,7 @@ import { createEffect, createMemo, type JSX, onMount, createSignal, onCleanup, o
 import "opentui-spinner/solid"
 import path from "path"
 import { pathToFileURL } from "bun"
+import { existsSync } from "fs"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
 import { useTheme } from "@tui/context/theme"
@@ -1055,6 +1056,11 @@ export function Prompt(props: PromptProps) {
                         })
                         return
                       }
+                    }
+                    if (existsSync(filepath)) {
+                      event.preventDefault()
+                      await pasteFile(filepath)
+                      return
                     }
                   } catch {}
                 }
