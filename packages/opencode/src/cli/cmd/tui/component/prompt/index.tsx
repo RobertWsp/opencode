@@ -998,20 +998,32 @@ export function Prompt(props: PromptProps) {
                     if (!path.isAbsolute(fp)) return path.resolve(sync.data.path.directory || process.cwd(), fp)
                     return fp
                   })
-                  const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
-                  if (allExist.every(Boolean)) {
+                  if (fps.every((fp) => fp.startsWith("/") || fp.startsWith("~/") || fp.startsWith("file://"))) {
                     event.preventDefault()
-                    for (const fp of resolved) {
-                      const mime = Filesystem.mimeType(fp)
-                      if (mime.startsWith("image/") && mime !== "image/svg+xml") {
-                        const filename = path.basename(fp)
-                        const content = await Filesystem.readArrayBuffer(fp)
-                          .then((buffer) => Buffer.from(buffer).toString("base64"))
-                          .catch(() => undefined)
-                        if (content) await pasteImage({ filename, mime, content })
-                      } else {
-                        await pasteFile(fp)
+                    const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
+                    if (allExist.every(Boolean)) {
+                      for (const fp of resolved) {
+                        const mime = Filesystem.mimeType(fp)
+                        if (mime.startsWith("image/") && mime !== "image/svg+xml") {
+                          const filename = path.basename(fp)
+                          const content = await Filesystem.readArrayBuffer(fp)
+                            .then((buffer) => Buffer.from(buffer).toString("base64"))
+                            .catch(() => undefined)
+                          if (content) await pasteImage({ filename, mime, content })
+                        } else {
+                          await pasteFile(fp)
+                        }
                       }
+                      return
+                    }
+                    const lineCount = (pastedContent.match(/\n/g)?.length ?? 0) + 1
+                    if (
+                      (lineCount >= 3 || pastedContent.length > 150) &&
+                      !sync.data.config.experimental?.disable_paste_summary
+                    ) {
+                      pasteText(pastedContent, `[Pasted ~${lineCount} lines]`)
+                    } else {
+                      input.insertText(pastedContent)
                     }
                     return
                   }
