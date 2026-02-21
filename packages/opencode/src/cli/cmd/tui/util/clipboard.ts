@@ -56,13 +56,39 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      const wayland = await $`wl-paste -t image/png`.nothrow().arrayBuffer()
-      if (wayland && wayland.byteLength > 0) {
-        return { data: Buffer.from(wayland).toString("base64"), mime: "image/png" }
-      }
-      const x11 = await $`xclip -selection clipboard -t image/png -o`.nothrow().arrayBuffer()
-      if (x11 && x11.byteLength > 0) {
-        return { data: Buffer.from(x11).toString("base64"), mime: "image/png" }
+      const mimePriority = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]
+      if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-paste")) {
+        const types = await $`wl-paste --list-types`.nothrow().quiet().text()
+        if (types) {
+          const available = types
+            .split("\n")
+            .map((x) => x.trim())
+            .filter(Boolean)
+          for (const mime of mimePriority) {
+            if (available.includes(mime)) {
+              const data = await $`wl-paste -t ${mime}`.nothrow().quiet().arrayBuffer()
+              if (data && data.byteLength > 0) {
+                return { data: Buffer.from(data).toString("base64"), mime }
+              }
+            }
+          }
+        }
+      } else if (Bun.which("xclip")) {
+        const targets = await $`xclip -selection clipboard -t TARGETS -o`.nothrow().quiet().text()
+        if (targets) {
+          const available = targets
+            .split("\n")
+            .map((x) => x.trim())
+            .filter(Boolean)
+          for (const mime of mimePriority) {
+            if (available.includes(mime)) {
+              const data = await $`xclip -selection clipboard -t ${mime} -o`.nothrow().quiet().arrayBuffer()
+              if (data && data.byteLength > 0) {
+                return { data: Buffer.from(data).toString("base64"), mime }
+              }
+            }
+          }
+        }
       }
     }
 
