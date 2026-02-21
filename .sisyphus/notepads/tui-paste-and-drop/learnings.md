@@ -146,3 +146,13 @@ The function is now ready to be called from:
 1. `onPaste` handler (for pasted file paths)
 2. Drag-drop handler (for dropped files)
 3. Task 4 will route image files to pasteImage(), non-images to pasteFile()
+
+## [2026-02-21] Task 4 — onPaste multi-file path attach
+
+- Inserted a multi-file detection block in `prompt/index.tsx` immediately after `filepath` normalization and before `isUrl` detection.
+- Logic now splits paste payload by newline, trims/filters empty lines, applies existing per-line normalization (`strip quotes`, `unescape \ `), resolves `file://`, `~/`, and relative paths, then checks `Filesystem.exists()` for all lines.
+- When all lines resolve to existing paths, paste is intercepted and each path is attached independently:
+  - raster images (`image/*` except SVG) are loaded as base64 and sent through `pasteImage()`
+  - everything else routes through `pasteFile()` (including directories and SVG)
+- If any line is not a valid existing path, handler falls through to existing behavior unchanged: URL/single-file checks and `[Pasted ~N lines]` summary for multiline text.
+- `bun run typecheck` from repo root passed (`Tasks: 12 successful, 12 total`).

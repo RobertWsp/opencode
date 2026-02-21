@@ -2,6 +2,7 @@ import { BoxRenderable, TextareaRenderable, MouseEvent, PasteEvent, t, dim, fg }
 import { createEffect, createMemo, type JSX, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
+import { pathToFileURL } from "bun"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
 import { useTheme } from "@tui/context/theme"
@@ -736,6 +737,61 @@ export function Prompt(props: PromptProps) {
     return
   }
 
+  async function pasteFile(filepath: string): Promise<void> {
+    // 1. Normalize path
+    let fp = filepath
+    if (fp.startsWith("file://")) fp = decodeURIComponent(new URL(fp).pathname)
+    if (fp.startsWith("~/")) fp = path.join(process.env["HOME"] ?? "~", fp.slice(2))
+    if (!path.isAbsolute(fp)) fp = path.resolve(sync.data.path.directory || process.cwd(), fp)
+
+    // 2. Validate — return silently if not found
+    if (!(await Filesystem.exists(fp))) return
+
+    // 3. Get metadata
+    const isDir = await Filesystem.isDir(fp)
+    const name = path.basename(fp)
+    const mime = isDir ? "inode/directory" : Filesystem.mimeType(fp)
+    const virtualText = isDir ? `[Dir: ${name}/]` : `[File: ${name}]`
+
+    // 4. Create extmark (same pattern as pasteImage)
+    const currentOffset = input.visualCursor.offset
+    const extmarkStart = currentOffset
+    const extmarkEnd = extmarkStart + virtualText.length
+
+    input.insertText(virtualText + " ")
+
+    const extmarkId = input.extmarks.create({
+      start: extmarkStart,
+      end: extmarkEnd,
+      virtual: true,
+      styleId: pasteStyleId,
+      typeId: promptPartTypeId,
+    })
+
+    // 5. Create FilePart with file:// URL (NOT data: URL)
+    const url = pathToFileURL(fp).href
+    const relPath = path.relative(sync.data.path.directory || process.cwd(), fp)
+
+    const part: Omit<FilePart, "id" | "messageID" | "sessionID"> = {
+      type: "file" as const,
+      mime,
+      filename: name,
+      url,
+      source: {
+        type: "file",
+        path: relPath,
+        text: { start: extmarkStart, end: extmarkEnd, value: virtualText },
+      },
+    }
+    setStore(
+      produce((draft) => {
+        const partIndex = draft.prompt.parts.length
+        draft.prompt.parts.push(part)
+        draft.extmarkToPartIndex.set(extmarkId, partIndex)
+      }),
+    )
+  }
+
   const highlight = createMemo(() => {
     if (keybind.leader) return theme.border
     if (store.mode === "shell") return theme.primary
@@ -930,6 +986,36 @@ export function Prompt(props: PromptProps) {
                 // trim ' from the beginning and end of the pasted content. just
                 // ' and nothing else
                 const filepath = pastedContent.replace(/^'+|'+$/g, "").replace(/\\ /g, " ")
+                const lines = pastedContent
+                  .split("\n")
+                  .map((l) => l.trim())
+                  .filter(Boolean)
+                if (lines.length > 1) {
+                  const fps = lines.map((l) => l.replace(/^'+|'+$/g, "").replace(/\\ /g, " "))
+                  const resolved = fps.map((fp) => {
+                    if (fp.startsWith("file://")) return decodeURIComponent(new URL(fp).pathname)
+                    if (fp.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", fp.slice(2))
+                    if (!path.isAbsolute(fp)) return path.resolve(sync.data.path.directory || process.cwd(), fp)
+                    return fp
+                  })
+                  const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
+                  if (allExist.every(Boolean)) {
+                    event.preventDefault()
+                    for (const fp of resolved) {
+                      const mime = Filesystem.mimeType(fp)
+                      if (mime.startsWith("image/") && mime !== "image/svg+xml") {
+                        const filename = path.basename(fp)
+                        const content = await Filesystem.readArrayBuffer(fp)
+                          .then((buffer) => Buffer.from(buffer).toString("base64"))
+                          .catch(() => undefined)
+                        if (content) await pasteImage({ filename, mime, content })
+                      } else {
+                        await pasteFile(fp)
+                      }
+                    }
+                    return
+                  }
+                }
                 const isUrl = /^(https?):\/\//.test(filepath)
                 if (!isUrl) {
                   try {
