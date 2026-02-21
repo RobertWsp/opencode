@@ -60,6 +60,40 @@ export type PromptRef = {
 const PLACEHOLDERS = ["Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests"]
 const SHELL_PLACEHOLDERS = ["ls -la", "git status", "pwd"]
 
+// Tokenize shell-style strings: handles backslash-escaped spaces,
+// double-quoted and single-quoted segments. Covers all WezTerm
+// quote_dropped_files modes (SpacesOnly, Posix, Windows).
+function shellTokens(s: string): string[] {
+  const tokens: string[] = []
+  let cur = ""
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === "\\" && i + 1 < s.length) {
+      cur += s[i + 1]
+      i += 2
+    } else if (s[i] === '"') {
+      i++
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === "\\" && i + 1 < s.length) { cur += s[i + 1]; i += 2 }
+        else { cur += s[i]; i++ }
+      }
+      i++
+    } else if (s[i] === "'") {
+      i++
+      while (i < s.length && s[i] !== "'") { cur += s[i]; i++ }
+      i++
+    } else if (s[i] === " " || s[i] === "\t") {
+      if (cur) { tokens.push(cur); cur = "" }
+      i++
+    } else {
+      cur += s[i]
+      i++
+    }
+  }
+  if (cur) tokens.push(cur)
+  return tokens
+}
+
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
   let anchor: BoxRenderable
@@ -79,6 +113,7 @@ export function Prompt(props: PromptProps) {
   const renderer = useRenderer()
   const { theme, syntax } = useTheme()
   const kv = useKV()
+
 
   function promptModelWarning() {
     toast.show({
@@ -969,6 +1004,7 @@ export function Prompt(props: PromptProps) {
               }}
               onSubmit={submit}
               onPaste={async (event: PasteEvent) => {
+
                 if (props.disabled) {
                   event.preventDefault()
                   return
@@ -1027,6 +1063,62 @@ export function Prompt(props: PromptProps) {
                       input.insertText(pastedContent)
                     }
                     return
+                  }
+                }
+
+                // WezTerm DnD: space-separated paths with backslash-escaped spaces
+                // (quote_dropped_files = SpacesOnly/Posix/Windows modes)
+                if (lines.length === 1) {
+                  const tokens = shellTokens(pastedContent)
+                  if (tokens.length > 1 && tokens.every((t) => t.startsWith("/") || t.startsWith("~/") || t.startsWith("file://"))) {
+                    const resolved = tokens.map((t) => {
+                      if (t.startsWith("file://")) return decodeURIComponent(new URL(t).pathname)
+                      if (t.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", t.slice(2))
+                      if (!path.isAbsolute(t)) return path.resolve(sync.data.path.directory || process.cwd(), t)
+                      return t
+                    })
+                    const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
+                    if (allExist.every(Boolean)) {
+                      event.preventDefault()
+                      for (const fp of resolved) {
+                        const mime = Filesystem.mimeType(fp)
+                        if (mime.startsWith("image/") && mime !== "image/svg+xml") {
+                          const filename = path.basename(fp)
+                          const content = await Filesystem.readArrayBuffer(fp)
+                            .then((buffer) => Buffer.from(buffer).toString("base64"))
+                            .catch(() => undefined)
+                          if (content) await pasteImage({ filename, mime, content })
+                        } else {
+                          await pasteFile(fp)
+                        }
+                      }
+                      return
+                    }
+                  }
+                  // Single shell token that's a valid path (WezTerm DnD of 1 file)
+                  if (tokens.length === 1) {
+                    const t = tokens[0]
+                    if (t.startsWith("/") || t.startsWith("~/") || t.startsWith("file://")) {
+                      const fp = t.startsWith("file://")
+                        ? decodeURIComponent(new URL(t).pathname)
+                        : t.startsWith("~/")
+                          ? path.join(process.env["HOME"] ?? "~", t.slice(2))
+                          : t
+                      if (existsSync(fp)) {
+                        event.preventDefault()
+                        const mime = Filesystem.mimeType(fp)
+                        if (mime.startsWith("image/") && mime !== "image/svg+xml") {
+                          const filename = path.basename(fp)
+                          const content = await Filesystem.readArrayBuffer(fp)
+                            .then((buffer) => Buffer.from(buffer).toString("base64"))
+                            .catch(() => undefined)
+                          if (content) await pasteImage({ filename, mime, content })
+                        } else {
+                          await pasteFile(fp)
+                        }
+                        return
+                      }
+                    }
                   }
                 }
                 const isUrl = /^(https?):\/\//.test(filepath)
