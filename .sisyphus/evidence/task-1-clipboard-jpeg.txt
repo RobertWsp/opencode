@@ -1,0 +1,13 @@
+Prerequisites
+WAYLAND_DISPLAY=
+which wl-paste -> not found
+which wl-copy -> not found
+which convert -> not found
+
+Scenario 1 (JPEG) command output
+zsh:1: command not found: wl-copy
+zsh:1: command not found: wl-paste
+zsh:1: command not found: wl-paste
+
+Result
+Unable to validate JPEG clipboard MIME listing in this environment because Wayland clipboard tooling is unavailable.

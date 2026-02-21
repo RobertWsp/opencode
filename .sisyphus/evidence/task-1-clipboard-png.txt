@@ -1,0 +1,11 @@
+Prerequisites
+WAYLAND_DISPLAY=
+which wl-paste -> not found
+which wl-copy -> not found
+which convert -> not found
+
+Scenario 2 (PNG) command output
+PNG scenario could not run: wl-copy/wl-paste unavailable in environment.
+
+Result
+Unable to validate PNG backward compatibility in this environment because Wayland clipboard tooling is unavailable.

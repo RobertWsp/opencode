@@ -1,0 +1,11 @@
+Prerequisites
+WAYLAND_DISPLAY=
+which wl-paste -> not found
+which wl-copy -> not found
+
+Scenario 4 (Text clipboard) command output
+zsh:1: command not found: wl-copy
+zsh:1: command not found: wl-paste
+
+Result
+Text clipboard type listing could not be verified because Wayland clipboard tooling is unavailable.
