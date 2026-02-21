@@ -1,0 +1,35 @@
+== Step 3: Simulated Bracketed Paste Scenarios ==
+Date: 2026-02-20
+
+== Test Files Created ==
+/tmp/opencode-qa-test/
+  test.png     (0 bytes, image/png)
+  doc.pdf      (0 bytes, application/pdf)
+  my file.txt  (0 bytes, text/plain — space in name)
+  testdir/     (directory)
+
+== Path Normalization Tests (6/6 PASS) ==
+PASS | "file:///tmp/opencode-qa-test/test.png" → "/tmp/opencode-qa-test/test.png"
+PASS | "~/test.pdf" → "/home/robert/test.pdf"
+PASS | "'/tmp/opencode-qa-test/my file.txt'" → "/tmp/opencode-qa-test/my file.txt"
+PASS | "/tmp/opencode-qa-test/testdir" → "/tmp/opencode-qa-test/testdir"
+PASS | "/tmp/opencode-qa-test/doc.pdf" → "/tmp/opencode-qa-test/doc.pdf"
+PASS | "file:///tmp/opencode-qa-test/my%20file.txt" → "/tmp/opencode-qa-test/my file.txt"
+
+== Multi-File Paste Simulation ==
+Input (4 lines):
+  /tmp/opencode-qa-test/test.png
+  /tmp/opencode-qa-test/doc.pdf
+  '/tmp/opencode-qa-test/my file.txt'
+  /tmp/opencode-qa-test/testdir
+Result: All exist = true → Would trigger multi-file handling ✓
+
+== Mixed Valid+Invalid Test ==
+Input: ["/tmp/opencode-qa-test/test.png", "/tmp/NONEXISTENT_FILE.xyz"]
+Result: allExist.every(Boolean) = false → Falls through to original logic ✓
+
+== Empty Lines Filtered ==
+Input: "test.png\n\n\ndoc.pdf\n"
+Result: 2 lines after filter (empty strings removed) ✓
+
+== VERDICT: PASS (all simulations correct) ==

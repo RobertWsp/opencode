@@ -156,3 +156,26 @@ The function is now ready to be called from:
   - everything else routes through `pasteFile()` (including directories and SVG)
 - If any line is not a valid existing path, handler falls through to existing behavior unchanged: URL/single-file checks and `[Pasted ~N lines]` summary for multiline text.
 - `bun run typecheck` from repo root passed (`Tasks: 12 successful, 12 total`).
+
+## [2026-02-20] Task 5 — Build, Full QA, and Regression Test
+
+### Build Results
+- `bun run typecheck`: PASS (12/12 packages, all cached, 143ms)
+- `./packages/opencode/script/build.ts --single`: PASS (binary at dist/opencode-linux-x64/bin/opencode, 151MB)
+
+### QA Scenarios — All PASS
+
+| Scenario | Status | Evidence |
+|----------|--------|----------|
+| Full build succeeds | PASS | `.sisyphus/evidence/task-5-build.txt` |
+| Cross-task integration (Tasks 1-4) | PASS | `.sisyphus/evidence/task-5-cross-task.txt` |
+| Directory drag edge case | PASS | `.sisyphus/evidence/task-5-directory.txt` |
+| Nonexistent file in multi-file paste | PASS | `.sisyphus/evidence/task-5-nonexistent-in-multi.txt` |
+
+### Key Verifications
+- **Task 1 (clipboard.ts)**: MIME discovery via `wl-paste --list-types` / `xclip -t TARGETS -o` confirmed present with environment guards.
+- **Task 2 (pasteFile)**: 54-line function at lines 740-793 with path normalization (file://, ~/, relative), existence validation, directory detection, file:// URL generation via `pathToFileURL` from `"bun"`.
+- **Task 3 (research)**: No code changes — validated format assumptions in Tasks 2 and 4.
+- **Task 4 (onPaste)**: Multi-file detection at lines 989-1017 with `Promise.all(resolved.map(fp => Filesystem.exists(fp)))` and `allExist.every(Boolean)` gate. Falls through to text paste if ANY path is invalid.
+- **Directory handling**: `Filesystem.isDir()` check → `[Dir: name/]` virtual text, `inode/directory` MIME.
+- **No bugs found** during code review. All implementations match design spec.

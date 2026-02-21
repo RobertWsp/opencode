@@ -1,0 +1,58 @@
+======================================================================
+Task 5 — Edge Case: Directory Drag (Code Review)
+Date: 2026-02-20
+======================================================================
+
+SCENARIO: Edge case — directory drag
+STATUS: PASS
+
+----------------------------------------------------------------------
+File: packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+Function: pasteFile() — Lines 740-793
+----------------------------------------------------------------------
+
+CHECK: Does pasteFile() check for directories?
+  Line 751: `const isDir = await Filesystem.isDir(fp)`
+  PASS — Explicit directory check using Filesystem.isDir().
+
+CHECK: Does it use [Dir: name/] virtual text for directories?
+  Line 754: `const virtualText = isDir ? \`[Dir: \${name}/]\` : \`[File: \${name}]\``
+  PASS — Directory gets distinct virtual text with trailing slash.
+
+CHECK: Does it set MIME to "inode/directory" for directories?
+  Line 753: `const mime = isDir ? "inode/directory" : Filesystem.mimeType(fp)`
+  PASS — Correct MIME type for directories.
+
+CHECK: Does it create FilePart with file:// URL for directories?
+  Lines 772-785:
+  ```
+  const url = pathToFileURL(fp).href
+  const relPath = path.relative(sync.data.path.directory || process.cwd(), fp)
+  const part: Omit<FilePart, "id" | "messageID" | "sessionID"> = {
+    type: "file" as const,
+    mime,
+    filename: name,
+    url,
+    source: {
+      type: "file",
+      path: relPath,
+      text: { start: extmarkStart, end: extmarkEnd, value: virtualText },
+    },
+  }
+  ```
+  PASS — Directories get file:// URL and relative path, same as files.
+
+----------------------------------------------------------------------
+Full Flow Verification:
+----------------------------------------------------------------------
+1. Path normalized (file://, ~/, relative) → PASS (lines 742-745)
+2. Existence validated → PASS (line 748)
+3. isDir detected → PASS (line 751)
+4. MIME = "inode/directory" → PASS (line 753)
+5. Virtual text = "[Dir: name/]" → PASS (line 754)
+6. Extmark created with pasteStyleId → PASS (lines 757-769)
+7. FilePart stored in prompt parts → PASS (lines 786-792)
+
+======================================================================
+OVERALL: PASS — Directory handling is complete and correct.
+======================================================================

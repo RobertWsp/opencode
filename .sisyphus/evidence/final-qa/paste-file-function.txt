@@ -1,0 +1,56 @@
+== Scenario B: pasteFile() Function Correctness ==
+File: packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+Lines: 740-793
+
+== CHECKS ==
+
+[PASS] file:// prefix stripped (line 743):
+  if (fp.startsWith("file://")) fp = decodeURIComponent(new URL(fp).pathname)
+  → Correctly uses URL parser + decodeURIComponent for %20 etc.
+
+[PASS] Tilde expanded (line 744):
+  if (fp.startsWith("~/")) fp = path.join(process.env["HOME"] ?? "~", fp.slice(2))
+  → Falls back to "~" if HOME not set (safe default)
+
+[PASS] Relative paths resolved (line 745):
+  if (!path.isAbsolute(fp)) fp = path.resolve(sync.data.path.directory || process.cwd(), fp)
+  → Uses project directory first, falls back to cwd()
+
+[PASS] Silent return if file doesn't exist (line 748):
+  if (!(await Filesystem.exists(fp))) return
+  → No error thrown, no user-visible message — correct for batch paste
+
+[PASS] Directory detection (lines 751-754):
+  const isDir = await Filesystem.isDir(fp)
+  const name = path.basename(fp)
+  const mime = isDir ? "inode/directory" : Filesystem.mimeType(fp)
+  const virtualText = isDir ? `[Dir: ${name}/]` : `[File: ${name}]`
+  → Directories get trailing /, correct MIME assignment
+
+[PASS] Non-image files get [File: name] virtual text (line 754):
+  → Not `[Image: name]` — correct for non-image files
+
+[PASS] Uses pathToFileURL(fp).href for URL (line 772):
+  const url = pathToFileURL(fp).href
+  → NOT data: URL. Correct — file stays on disk, referenced by path.
+  → pathToFileURL properly handles spaces and special chars
+
+[PASS] Import present (line 5):
+  import { pathToFileURL } from "bun"
+
+[PASS] Extmark pattern matches pasteImage (lines 757-769):
+  → Same create/insert/style pattern as existing pasteImage function
+
+[PASS] FilePart creation (lines 775-785):
+  - type: "file"
+  - mime: correct (directory or file MIME)
+  - filename: basename
+  - url: file:// URL
+  - source.type: "file"
+  - source.path: relative path from project dir
+  - source.text: extmark coordinates + virtual text
+
+[PASS] Store update pattern (lines 786-792):
+  → produce() draft mutation, same pattern as pasteImage
+
+== VERDICT: PASS (11/11 checks) ==

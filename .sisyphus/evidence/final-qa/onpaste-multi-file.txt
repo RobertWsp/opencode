@@ -1,0 +1,65 @@
+== Scenario C: onPaste Multi-File Detection ==
+File: packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+Lines: 970-1067
+
+== CHECKS ==
+
+[PASS] CR/CRLF normalization (lines 979):
+  const normalizedText = event.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+  → Windows ConPTY/Terminal sends CR-only, handled correctly
+
+[PASS] Multi-line split by \n (lines 989-992):
+  const lines = pastedContent.split("\n").map((l) => l.trim()).filter(Boolean)
+  → Trims each line, filters empty lines
+
+[PASS] Per-line normalization (line 994):
+  const fps = lines.map((l) => l.replace(/^'+|'+$/g, "").replace(/\\ /g, " "))
+  → Strips quotes, unescapes spaces (same as single-file path)
+
+[PASS] Path resolution for each line (lines 995-999):
+  - file:// → decodeURIComponent(new URL(fp).pathname)
+  - ~/ → path.join(HOME, fp.slice(2))
+  - relative → path.resolve(projectDir, fp)
+  - absolute → passthrough
+
+[PASS] All-or-nothing validation (line 1001):
+  const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
+  → Parallel existence check
+
+[PASS] allExist.every(Boolean) gate (line 1002):
+  if (allExist.every(Boolean)) { ... }
+  → Only processes if ALL paths are valid files/dirs
+
+[PASS] Images → pasteImage() (lines 1006-1011):
+  - Checks mime.startsWith("image/") && mime !== "image/svg+xml"
+  - Reads as base64 via readArrayBuffer
+  - Calls pasteImage({ filename, mime, content })
+
+[PASS] Non-images → pasteFile() (lines 1012-1013):
+  else { await pasteFile(fp) }
+  → Calls the new pasteFile function for non-image files
+
+[PASS] Falls through if NOT all paths valid:
+  - allExist.every(Boolean) fails → no event.preventDefault()
+  - Code continues to single-file path check (line 1019)
+  - Then to [Pasted ~N lines] logic (line 1050)
+
+[PASS] [Pasted ~N lines] logic still reachable (lines 1050-1058):
+  const lineCount = (pastedContent.match(/\n/g)?.length ?? 0) + 1
+  if ((lineCount >= 3 || pastedContent.length > 150) && !sync.data.config.experimental?.disable_paste_summary)
+  → Still present, still reachable when multi-file detection fails
+
+[PASS] URL check still present (line 1019):
+  const isUrl = /^(https?):\/\//.test(filepath)
+  → URLs are excluded from file path handling
+
+[PASS] event.preventDefault() called correctly (line 1003):
+  → Only called when allExist.every(Boolean) is true
+  → Prevents default text insertion when handling files
+
+[PASS] Sequential file processing (lines 1004-1015):
+  for (const fp of resolved) { ... }
+  → Processes each file sequentially with await
+  → Maintains insertion order in prompt
+
+== VERDICT: PASS (13/13 checks) ==

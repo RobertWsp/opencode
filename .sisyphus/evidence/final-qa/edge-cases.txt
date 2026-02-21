@@ -1,0 +1,53 @@
+== Scenario E: Edge Cases Verification ==
+File: packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+
+== CHECKS ==
+
+[PASS] file:///tmp/photo.png → stripped to /tmp/photo.png (line 996):
+  Code: if (fp.startsWith("file://")) return decodeURIComponent(new URL(fp).pathname)
+  Test: new URL("file:///tmp/photo.png").pathname === "/tmp/photo.png"
+  → decodeURIComponent handles %20 → " " for paths with spaces
+  → Same logic duplicated in pasteFile() at line 743 (consistency)
+
+[PASS] ~/test.pdf → expanded to /home/user/test.pdf (line 997):
+  Code: if (fp.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", fp.slice(2))
+  Test: path.join("/home/robert", "test.pdf") === "/home/robert/test.pdf"
+  → Falls back to "~" if HOME undefined (edge case, unlikely in practice)
+
+[PASS] Mixed valid+invalid paths → falls through (line 1002):
+  Code: if (allExist.every(Boolean)) { ... }
+  Scenario: ["/tmp/exists.txt", "/tmp/NONEXISTENT.txt"]
+  Result: allExist = [true, false], every(Boolean) = false → falls through
+  → No event.preventDefault() → original paste logic handles it
+  → Could trigger [Pasted ~N lines] or raw paste depending on content
+
+[PASS] Empty lines filtered (line 992):
+  Code: .filter(Boolean)
+  Scenario: "/tmp/a.txt\n\n\n/tmp/b.txt\n"
+  Result: lines = ["/tmp/a.txt", "/tmp/b.txt"] (empty strings removed)
+  → Prevents Filesystem.exists("") calls
+
+[PASS] Escaped spaces in path (line 994):
+  Code: .replace(/\\ /g, " ")
+  Scenario: "/tmp/my\\ file.txt" → "/tmp/my file.txt"
+  → Terminal file managers often escape spaces with backslash
+
+[PASS] Single-quoted paths (line 994):
+  Code: .replace(/^'+|'+$/g, "")
+  Scenario: "'/tmp/my file.txt'" → "/tmp/my file.txt"
+  → Nautilus/Dolphin file managers wrap paths in quotes
+
+[PASS] Single line does NOT enter multi-file block (line 993):
+  Code: if (lines.length > 1) { ... }
+  → Single file paste goes to original handling at line 1019+
+
+[PASS] SVG exclusion in multi-file (line 1006):
+  Code: if (mime.startsWith("image/") && mime !== "image/svg+xml")
+  → SVGs in multi-file paste go to pasteFile() (as [File: icon.svg])
+  → Single-file SVGs still get special pasteText handling at line 1025
+
+[PASS] pasteFile handles nonexistent silently (line 748 of pasteFile):
+  Code: if (!(await Filesystem.exists(fp))) return
+  → Even if Promise.all race condition makes file vanish between check and paste
+
+== VERDICT: PASS (9/9 checks) ==
