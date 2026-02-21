@@ -1071,6 +1071,7 @@ export function Prompt(props: PromptProps) {
                 if (lines.length === 1) {
                   const tokens = shellTokens(pastedContent)
                   if (tokens.length > 1 && tokens.every((t) => t.startsWith("/") || t.startsWith("~/") || t.startsWith("file://"))) {
+                    event.preventDefault()
                     const resolved = tokens.map((t) => {
                       if (t.startsWith("file://")) return decodeURIComponent(new URL(t).pathname)
                       if (t.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", t.slice(2))
@@ -1079,7 +1080,6 @@ export function Prompt(props: PromptProps) {
                     })
                     const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
                     if (allExist.every(Boolean)) {
-                      event.preventDefault()
                       for (const fp of resolved) {
                         const mime = Filesystem.mimeType(fp)
                         if (mime.startsWith("image/") && mime !== "image/svg+xml") {
@@ -1094,6 +1094,8 @@ export function Prompt(props: PromptProps) {
                       }
                       return
                     }
+                    input.insertText(pastedContent)
+                    return
                   }
                   // Single shell token that's a valid path (WezTerm DnD of 1 file)
                   if (tokens.length === 1) {
