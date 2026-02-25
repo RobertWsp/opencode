@@ -786,7 +786,7 @@ export function Prompt(props: PromptProps) {
     // 3. Get metadata
     const isDir = await Filesystem.isDir(fp)
     const name = path.basename(fp)
-    const mime = isDir ? "inode/directory" : Filesystem.mimeType(fp)
+    const mime = isDir ? "application/x-directory" : "text/plain"
     const virtualText = isDir ? `[Dir: ${name}/]` : `[File: ${name}]`
 
     // 4. Create extmark (same pattern as pasteImage)
@@ -1151,9 +1151,12 @@ export function Prompt(props: PromptProps) {
                         return
                       }
                     }
-                    if (existsSync(filepath)) {
+                    const resolved = path.isAbsolute(filepath)
+                      ? filepath
+                      : path.resolve(sync.data.path.directory || process.cwd(), filepath)
+                    if (existsSync(resolved)) {
                       event.preventDefault()
-                      await pasteFile(filepath)
+                      await pasteFile(resolved)
                       return
                     }
                   } catch {}
