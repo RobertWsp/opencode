@@ -369,8 +369,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       async toggle(name: string) {
         const status = sync.data.mcp[name]
         if (status?.status === "connected") {
-          // Disable: disconnect the MCP
+          // Restart: disconnect then reconnect to fully restart the server process
           await sdk.client.mcp.disconnect({ name })
+          await sdk.client.mcp.connect({ name })
         } else {
           // Enable/Retry: connect the MCP (handles disabled, failed, and other states)
           await sdk.client.mcp.connect({ name })
