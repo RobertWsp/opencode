@@ -9,7 +9,7 @@ import { Bus } from "@/bus"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
-import type { Provider } from "@/provider/provider"
+import { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -19,6 +19,25 @@ import { Question } from "@/question"
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
+
+  async function injectSwitchNotification(
+    msg: MessageV2.Assistant,
+    sessionID: string,
+    pool: NonNullable<Awaited<ReturnType<typeof Provider.getPool>>>,
+  ) {
+    const stats = pool.stats()
+    const states = pool.states()
+    const active = states[stats.activeIndex]
+    await Session.updatePart({
+      id: Identifier.ascending("part"),
+      messageID: msg.id,
+      sessionID,
+      type: "text",
+      text: `⚡ Account switched → ${active.info.label}`,
+      ignored: true,
+      synthetic: true,
+    })
+  }
 
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
@@ -46,6 +65,7 @@ export namespace SessionProcessor {
         log.info("process")
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        let switches = 0
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
@@ -250,6 +270,7 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  await Provider.trackUsage(input.model.providerID, usage.tokens.total ?? 0)
                   await Session.updatePart({
                     id: Identifier.ascending("part"),
                     reason: value.finishReason,
@@ -355,6 +376,39 @@ export namespace SessionProcessor {
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {
               // TODO: Handle context overflow error
+            }
+            if (MessageV2.APIError.isInstance(error)) {
+              const pool = await Provider.getPool(input.model.providerID)
+              if (pool) {
+                const { activeIndex } = pool.stats()
+                if (error.data.statusCode === 429) {
+                  const retryAfterMs = error.data.responseHeaders?.["retry-after-ms"]
+                    ? Number.parseFloat(error.data.responseHeaders["retry-after-ms"])
+                    : error.data.responseHeaders?.["retry-after"]
+                      ? Number.parseFloat(error.data.responseHeaders["retry-after"]) * 1000
+                      : 60_000
+                  pool.cooldown(activeIndex, Date.now() + retryAfterMs)
+                  if (pool.hasHealthy() && switches < 3) {
+                    switches++
+                    await Provider.rotateAccount(input.model.providerID)
+                    if (pool.stats().activeIndex !== activeIndex) {
+                      await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                      continue
+                    }
+                  }
+                }
+                if (error.data.statusCode === 401) {
+                  pool.disable(activeIndex)
+                  if (pool.hasHealthy() && switches < 3) {
+                    switches++
+                    await Provider.rotateAccount(input.model.providerID)
+                    if (pool.stats().activeIndex !== activeIndex) {
+                      await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                      continue
+                    }
+                  }
+                }
+              }
             }
             const retry = SessionRetry.retryable(error)
             if (retry !== undefined) {
