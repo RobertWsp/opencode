@@ -1004,6 +1004,15 @@ export namespace Config {
             .describe(
               "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
             ),
+          accounts: z
+            .array(
+              z.object({
+                key: z.string(),
+                label: z.string().optional(),
+              })
+            )
+            .optional()
+            .describe("Multiple API keys for account rotation"),
         })
         .catchall(z.any())
         .optional(),

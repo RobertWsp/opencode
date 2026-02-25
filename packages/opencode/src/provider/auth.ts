@@ -15,7 +15,7 @@ export namespace ProviderAuth {
       map((x) => [x.auth!.provider, x.auth!] as const),
       fromEntries(),
     )
-    return { methods, pending: {} as Record<string, AuthOuathResult> }
+    return { methods, pending: {} as Record<string, { result: AuthOuathResult; authKey?: string }> }
   })
 
   export const Method = z
@@ -55,13 +55,14 @@ export namespace ProviderAuth {
     z.object({
       providerID: z.string(),
       method: z.number(),
+      authKey: z.string().optional(),
     }),
     async (input): Promise<Authorization | undefined> => {
       const auth = await state().then((s) => s.methods[input.providerID])
       const method = auth.methods[input.method]
       if (method.type === "oauth") {
         const result = await method.authorize()
-        await state().then((s) => (s.pending[input.providerID] = result))
+        await state().then((s) => (s.pending[input.providerID] = { result, authKey: input.authKey }))
         return {
           url: result.url,
           method: result.method,
@@ -76,10 +77,13 @@ export namespace ProviderAuth {
       providerID: z.string(),
       method: z.number(),
       code: z.string().optional(),
+      authKey: z.string().optional(),
     }),
     async (input) => {
-      const match = await state().then((s) => s.pending[input.providerID])
-      if (!match) throw new OauthMissing({ providerID: input.providerID })
+      const pending = await state().then((s) => s.pending[input.providerID])
+      if (!pending) throw new OauthMissing({ providerID: input.providerID })
+      const match = pending.result
+      const target = input.authKey ?? pending.authKey ?? input.providerID
       let result
 
       if (match.method === "code") {
@@ -93,7 +97,7 @@ export namespace ProviderAuth {
 
       if (result?.type === "success") {
         if ("key" in result) {
-          await Auth.set(input.providerID, {
+          await Auth.set(target, {
             type: "api",
             key: result.key,
           })
@@ -108,7 +112,7 @@ export namespace ProviderAuth {
           if (result.accountId) {
             info.accountId = result.accountId
           }
-          await Auth.set(input.providerID, info)
+          await Auth.set(target, info)
         }
         return
       }
@@ -121,9 +125,10 @@ export namespace ProviderAuth {
     z.object({
       providerID: z.string(),
       key: z.string(),
+      authKey: z.string().optional(),
     }),
     async (input) => {
-      await Auth.set(input.providerID, {
+      await Auth.set(input.authKey ?? input.providerID, {
         type: "api",
         key: input.key,
       })

@@ -44,6 +44,8 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
 import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
 import { Installation } from "../installation"
+import { AccountPool, createPool } from "./account-pool"
+import { loadStats, debouncedSave } from "./account-pool-store"
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
@@ -775,6 +777,7 @@ export namespace Provider {
       [providerID: string]: CustomModelLoader
     } = {}
     const sdk = new Map<number, SDK>()
+    const pools = new Map<string, AccountPool.Pool>()
 
     log.info("init")
 
@@ -934,7 +937,13 @@ export namespace Provider {
 
       // Load for the main provider if auth exists
       if (auth) {
-        const options = await plugin.auth.loader(() => Auth.get(providerID) as any, database[plugin.auth.provider])
+        const options = await plugin.auth.loader(async () => {
+          const pool = pools.get(providerID)
+          const key = pool ? pool.authKey() : providerID
+          const auth = await Auth.get(key)
+          if (!auth) return undefined as unknown as Auth.Info
+          return { ...auth, _key: key } as Auth.InfoWithKey
+        }, database[plugin.auth.provider])
         const opts = options ?? {}
         const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
         mergeProvider(providerID, patch)
@@ -1026,11 +1035,81 @@ export namespace Provider {
       log.info("found", { providerID })
     }
 
+    // Create account pools from Auth entries
+    for (const [providerID, provider] of Object.entries(providers)) {
+      // Skip indexed sub-keys (e.g. "anthropic:1") — already handled by Auth.list() on the base provider
+      if (providerID.includes(":")) continue
+      const entries = await Auth.list(providerID)
+      if (entries.length >= 1) {
+        let oauth = 0
+        let api = 0
+        const pool = entries.map((entry) => {
+          const key =
+            entry.info.type === "api"
+              ? entry.info.key
+              : entry.info.type === "oauth"
+                ? entry.info.refresh
+                : entry.info.type === "wellknown"
+                  ? entry.info.key
+                  : ""
+          if (entry.info.type === "oauth") oauth++
+          if (entry.info.type === "api") api++
+          const label =
+            entry.info.type === "oauth" && entry.info.accountId
+              ? entry.info.accountId
+              : entry.info.type === "oauth"
+                ? providerID === "anthropic"
+                  ? `Claude Pro/Max #${oauth}`
+                  : `OAuth #${oauth}`
+                : entry.info.type === "api"
+                  ? `API Key #${api}`
+                  : `Account #${oauth + api}`
+          return { key, label, providerID, authKey: entry.key }
+        })
+        pools.set(providerID, createPool(pool))
+        continue
+      }
+      // Legacy: config.provider[id].options.accounts (raw API keys in opencode.json)
+      const legacy = config.provider?.[providerID]?.options?.accounts
+      if (legacy?.length) {
+        pools.set(
+          providerID,
+          createPool(
+            legacy.map((a: { key: string; label?: string }, i: number) => ({
+              key: a.key,
+              label: a.label ?? `Account #${i + 1}`,
+              providerID,
+            })),
+          ),
+        )
+        continue
+      }
+      if (provider.key) {
+        pools.set(providerID, createPool([{ key: provider.key, label: "Account #1", providerID }]))
+      }
+    }
+
+    // Restore persisted usage stats
+    for (const [providerID, pool] of pools) {
+      const persisted = loadStats(providerID)
+      const states = pool.states()
+      for (const p of persisted) {
+        if (p.index >= states.length) continue
+        const s = states[p.index]
+        s.requestCount = p.requestCount
+        s.tokenCount = p.tokenCount
+        s.lastUsedAt = p.lastUsedAt
+        s.switchCount = p.switchCount
+        if (p.status === "disabled") pool.disable(p.index)
+      }
+    }
+
     return {
       models: languages,
       providers,
       sdk,
       modelLoaders,
+      pools,
     }
   })
 
@@ -1057,7 +1136,11 @@ export namespace Provider {
 
       const baseURL = loadBaseURL(model, options)
       if (baseURL !== undefined) options["baseURL"] = baseURL
-      if (options["apiKey"] === undefined && provider.key) options["apiKey"] = provider.key
+      const pool = s.pools.get(model.providerID)
+      if (options["apiKey"] === undefined) {
+        if (pool) options["apiKey"] = pool.key()
+        else if (provider.key) options["apiKey"] = provider.key
+      }
       if (model.headers)
         options["headers"] = {
           ...options["headers"],
@@ -1145,6 +1228,99 @@ export namespace Provider {
 
   export async function getProvider(providerID: string) {
     return state().then((s) => s.providers[providerID])
+  }
+
+  export async function getPool(providerID: string) {
+    return state().then((s) => s.pools.get(providerID))
+  }
+
+  export async function rotateAccount(providerID: string) {
+    const s = await state()
+    const pool = s.pools.get(providerID)
+    if (!pool) return
+    pool.next()
+    debouncedSave(providerID, pool.states())
+    s.sdk.clear()
+    s.models.clear()
+  }
+
+  export async function trackUsage(providerID: string, tokens: number) {
+    const s = await state()
+    const pool = s.pools.get(providerID)
+    if (!pool) return
+    pool.increment(pool.stats().activeIndex, tokens)
+    debouncedSave(providerID, pool.states())
+  }
+
+  export async function accountsStatus() {
+    const s = await state()
+    const result: Record<
+      string,
+      {
+        providerID: string
+        activeIndex: number
+        accounts: Array<{
+          index: number
+          label: string
+          status: "active" | "cooldown" | "disabled"
+          requestCount: number
+          tokenCount: number
+          switchCount: number
+          cooldownUntil?: number
+        }>
+      }
+    > = {}
+    for (const [id, pool] of s.pools) {
+      const stats = pool.stats()
+      result[id] = {
+        providerID: id,
+        activeIndex: stats.activeIndex,
+        accounts: pool.states().map((a) => ({
+          index: a.info.index,
+          label: a.info.label,
+          status: a.status,
+          requestCount: a.requestCount,
+          tokenCount: a.tokenCount,
+          switchCount: a.switchCount,
+          cooldownUntil: a.cooldownUntil,
+        })),
+      }
+    }
+    return result
+  }
+
+  export async function addAccount(providerID: string, key: string, label?: string) {
+    const config = await Config.get()
+    const provider = (config.provider?.[providerID] ?? {}) as Record<string, unknown>
+    const existing = (provider.accounts ?? []) as Array<{ key: string; label?: string }>
+    const idx = existing.length
+    const accounts = [...existing, { key, label: label ?? `Account #${idx + 1}` }]
+    await Config.updateGlobal({
+      provider: {
+        [providerID]: {
+          ...provider,
+          accounts,
+        },
+      },
+    } as any)
+    return { index: idx, label: accounts[idx].label }
+  }
+
+  export async function removeAccount(providerID: string, index: number) {
+    const config = await Config.get()
+    const provider = (config.provider?.[providerID] ?? {}) as Record<string, unknown>
+    const existing = (provider.accounts ?? []) as Array<{ key: string; label?: string }>
+    if (index < 0 || index >= existing.length) return false
+    const accounts = existing.filter((_: unknown, i: number) => i !== index)
+    await Config.updateGlobal({
+      provider: {
+        [providerID]: {
+          ...provider,
+          accounts: accounts.length > 0 ? accounts : undefined,
+        },
+      },
+    } as any)
+    return true
   }
 
   export async function getModel(providerID: string, modelID: string) {
