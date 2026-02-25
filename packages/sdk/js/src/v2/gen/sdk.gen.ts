@@ -8,7 +8,7 @@ import type {
   AppLogErrors,
   AppLogResponses,
   AppSkillsResponses,
-  Auth as Auth3,
+  Auth as Auth4,
   AuthRemoveErrors,
   AuthRemoveResponses,
   AuthSetErrors,
@@ -75,6 +75,12 @@ import type {
   ProjectListResponses,
   ProjectUpdateErrors,
   ProjectUpdateResponses,
+  ProviderAccountsAddErrors,
+  ProviderAccountsAddResponses,
+  ProviderAccountsRemoveErrors,
+  ProviderAccountsRemoveResponses,
+  ProviderAccountsResponses,
+  ProviderAuthListResponses,
   ProviderAuthResponses,
   ProviderListResponses,
   ProviderOauthAuthorizeErrors,
@@ -329,7 +335,7 @@ export class Auth extends HeyApiClient {
   public set<ThrowOnError extends boolean = false>(
     parameters: {
       providerID: string
-      auth?: Auth3
+      auth?: Auth4
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2083,6 +2089,38 @@ export class Question extends HeyApiClient {
   }
 }
 
+export class Auth2 extends HeyApiClient {
+  /**
+   * List auth entries
+   *
+   * List all authentication entries for a provider, including indexed multi-account entries.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      providerID: string
+      directory?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "providerID" },
+            { in: "query", key: "directory" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ProviderAuthListResponses, unknown, ThrowOnError>({
+      url: "/provider/auth/list/{providerID}",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Oauth extends HeyApiClient {
   /**
    * OAuth authorize
@@ -2094,6 +2132,7 @@ export class Oauth extends HeyApiClient {
       providerID: string
       directory?: string
       method?: number
+      authKey?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2105,6 +2144,7 @@ export class Oauth extends HeyApiClient {
             { in: "path", key: "providerID" },
             { in: "query", key: "directory" },
             { in: "body", key: "method" },
+            { in: "body", key: "authKey" },
           ],
         },
       ],
@@ -2136,6 +2176,7 @@ export class Oauth extends HeyApiClient {
       directory?: string
       method?: number
       code?: string
+      authKey?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2148,6 +2189,7 @@ export class Oauth extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "body", key: "method" },
             { in: "body", key: "code" },
+            { in: "body", key: "authKey" },
           ],
         },
       ],
@@ -2158,6 +2200,90 @@ export class Oauth extends HeyApiClient {
       ThrowOnError
     >({
       url: "/provider/{providerID}/oauth/callback",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class Accounts extends HeyApiClient {
+  /**
+   * Add account
+   *
+   * Add an API key account to a provider via Auth storage.
+   */
+  public add<ThrowOnError extends boolean = false>(
+    parameters: {
+      providerID: string
+      directory?: string
+      apiKey?: string
+      label?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "providerID" },
+            { in: "query", key: "directory" },
+            { in: "body", key: "apiKey" },
+            { in: "body", key: "label" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<ProviderAccountsAddResponses, ProviderAccountsAddErrors, ThrowOnError>(
+      {
+        url: "/provider/{providerID}/accounts/add",
+        ...options,
+        ...params,
+        headers: {
+          "Content-Type": "application/json",
+          ...options?.headers,
+          ...params.headers,
+        },
+      },
+    )
+  }
+
+  /**
+   * Remove account
+   *
+   * Remove an auth entry from a provider by its auth key.
+   */
+  public remove<ThrowOnError extends boolean = false>(
+    parameters: {
+      providerID: string
+      directory?: string
+      authKey?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "providerID" },
+            { in: "query", key: "directory" },
+            { in: "body", key: "authKey" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      ProviderAccountsRemoveResponses,
+      ProviderAccountsRemoveErrors,
+      ThrowOnError
+    >({
+      url: "/provider/{providerID}/accounts/remove",
       ...options,
       ...params,
       headers: {
@@ -2208,9 +2334,38 @@ export class Provider extends HeyApiClient {
     })
   }
 
+  /**
+   * Get account pool status
+   *
+   * Get the status of all multi-account pools for providers with multiple API keys.
+   */
+  public accounts<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "directory" }] }])
+    return (options?.client ?? this.client).get<ProviderAccountsResponses, unknown, ThrowOnError>({
+      url: "/provider/accounts",
+      ...options,
+      ...params,
+    })
+  }
+
+  private _auth?: Auth2
+  get auth2(): Auth2 {
+    return (this._auth ??= new Auth2({ client: this.client }))
+  }
+
   private _oauth?: Oauth
   get oauth(): Oauth {
     return (this._oauth ??= new Oauth({ client: this.client }))
+  }
+
+  private _accounts?: Accounts
+  get accounts2(): Accounts {
+    return (this._accounts ??= new Accounts({ client: this.client }))
   }
 }
 
@@ -2393,7 +2548,7 @@ export class File extends HeyApiClient {
   }
 }
 
-export class Auth2 extends HeyApiClient {
+export class Auth3 extends HeyApiClient {
   /**
    * Remove MCP OAuth
    *
@@ -2637,9 +2792,9 @@ export class Mcp extends HeyApiClient {
     })
   }
 
-  private _auth?: Auth2
-  get auth(): Auth2 {
-    return (this._auth ??= new Auth2({ client: this.client }))
+  private _auth?: Auth3
+  get auth(): Auth3 {
+    return (this._auth ??= new Auth3({ client: this.client }))
   }
 }
 

@@ -68,6 +68,44 @@ export type EventGlobalDisposed = {
   }
 }
 
+export type EventAccountSwitched = {
+  type: "account.switched"
+  properties: {
+    providerID: string
+    fromIndex: number
+    toIndex: number
+    fromLabel: string
+    toLabel: string
+    reason: "429" | "proactive" | "manual"
+  }
+}
+
+export type EventAccountCooldown = {
+  type: "account.cooldown"
+  properties: {
+    providerID: string
+    accountIndex: number
+    cooldownUntil: number
+    reason: string
+  }
+}
+
+export type EventAccountStatus = {
+  type: "account.status"
+  properties: {
+    providerID: string
+    accounts: Array<{
+      index: number
+      label: string
+      status: "active" | "cooldown" | "disabled"
+      requestCount: number
+      tokenCount: number
+      switchCount: number
+      cooldownUntil?: number
+    }>
+  }
+}
+
 export type EventLspClientDiagnostics = {
   type: "lsp.client.diagnostics"
   properties: {
@@ -948,6 +986,9 @@ export type Event =
   | EventServerInstanceDisposed
   | EventServerConnected
   | EventGlobalDisposed
+  | EventAccountSwitched
+  | EventAccountCooldown
+  | EventAccountStatus
   | EventLspClientDiagnostics
   | EventLspUpdated
   | EventFileEdited
@@ -1589,7 +1630,24 @@ export type ProviderConfig = {
      * Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.
      */
     timeout?: number | false
-    [key: string]: unknown | string | boolean | number | false | undefined
+    /**
+     * Multiple API keys for account rotation
+     */
+    accounts?: Array<{
+      key: string
+      label?: string
+    }>
+    [key: string]:
+      | unknown
+      | string
+      | boolean
+      | number
+      | false
+      | Array<{
+          key: string
+          label?: string
+        }>
+      | undefined
   }
 }
 
@@ -4199,12 +4257,43 @@ export type ProviderAuthResponses = {
 
 export type ProviderAuthResponse = ProviderAuthResponses[keyof ProviderAuthResponses]
 
+export type ProviderAuthListData = {
+  body?: never
+  path: {
+    /**
+     * Provider ID
+     */
+    providerID: string
+  }
+  query?: {
+    directory?: string
+  }
+  url: "/provider/auth/list/{providerID}"
+}
+
+export type ProviderAuthListResponses = {
+  /**
+   * Auth entries for provider
+   */
+  200: Array<{
+    key: string
+    type: string
+    label: string
+  }>
+}
+
+export type ProviderAuthListResponse = ProviderAuthListResponses[keyof ProviderAuthListResponses]
+
 export type ProviderOauthAuthorizeData = {
   body?: {
     /**
      * Auth method index
      */
     method: number
+    /**
+     * Target auth key for multi-account
+     */
+    authKey?: string
   }
   path: {
     /**
@@ -4246,6 +4335,10 @@ export type ProviderOauthCallbackData = {
      * OAuth authorization code
      */
     code?: string
+    /**
+     * Target auth key for multi-account
+     */
+    authKey?: string
   }
   path: {
     /**
@@ -4276,6 +4369,116 @@ export type ProviderOauthCallbackResponses = {
 }
 
 export type ProviderOauthCallbackResponse = ProviderOauthCallbackResponses[keyof ProviderOauthCallbackResponses]
+
+export type ProviderAccountsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+  }
+  url: "/provider/accounts"
+}
+
+export type ProviderAccountsResponses = {
+  /**
+   * Account pool status by provider
+   */
+  200: {
+    [key: string]: {
+      providerID: string
+      activeIndex: number
+      accounts: Array<{
+        index: number
+        label: string
+        status: "active" | "cooldown" | "disabled"
+        requestCount: number
+        tokenCount: number
+        switchCount: number
+        cooldownUntil?: number
+      }>
+    }
+  }
+}
+
+export type ProviderAccountsResponse = ProviderAccountsResponses[keyof ProviderAccountsResponses]
+
+export type ProviderAccountsAddData = {
+  body?: {
+    /**
+     * API key
+     */
+    apiKey: string
+    /**
+     * Account label
+     */
+    label?: string
+  }
+  path: {
+    /**
+     * Provider ID
+     */
+    providerID: string
+  }
+  query?: {
+    directory?: string
+  }
+  url: "/provider/{providerID}/accounts/add"
+}
+
+export type ProviderAccountsAddErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProviderAccountsAddError = ProviderAccountsAddErrors[keyof ProviderAccountsAddErrors]
+
+export type ProviderAccountsAddResponses = {
+  /**
+   * Account added
+   */
+  200: {
+    key: string
+    label: string
+  }
+}
+
+export type ProviderAccountsAddResponse = ProviderAccountsAddResponses[keyof ProviderAccountsAddResponses]
+
+export type ProviderAccountsRemoveData = {
+  body?: {
+    /**
+     * Auth key to remove (e.g. anthropic:1)
+     */
+    authKey: string
+  }
+  path: {
+    providerID: string
+  }
+  query?: {
+    directory?: string
+  }
+  url: "/provider/{providerID}/accounts/remove"
+}
+
+export type ProviderAccountsRemoveErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProviderAccountsRemoveError = ProviderAccountsRemoveErrors[keyof ProviderAccountsRemoveErrors]
+
+export type ProviderAccountsRemoveResponses = {
+  /**
+   * Account removed
+   */
+  200: boolean
+}
+
+export type ProviderAccountsRemoveResponse = ProviderAccountsRemoveResponses[keyof ProviderAccountsRemoveResponses]
 
 export type FindTextData = {
   body?: never
