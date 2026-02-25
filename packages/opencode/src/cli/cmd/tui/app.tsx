@@ -9,6 +9,7 @@ import { Installation } from "@/installation"
 import { Flag } from "@/flag/flag"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
+import { DialogAccountAdd, DialogAccountRemove } from "@tui/component/dialog-account"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
@@ -504,6 +505,28 @@ function App() {
       },
       onSelect: () => {
         dialog.replace(() => <DialogProviderList />)
+      },
+      category: "Provider",
+    },
+    {
+      title: "Add account",
+      value: "provider.account.add",
+      slash: {
+        name: "add-account",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAccountAdd />)
+      },
+      category: "Provider",
+    },
+    {
+      title: "Remove account",
+      value: "provider.account.remove",
+      slash: {
+        name: "remove-account",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAccountRemove />)
       },
       category: "Provider",
     },

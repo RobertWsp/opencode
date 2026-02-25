@@ -25,6 +25,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     diff: true,
     todo: true,
     lsp: true,
+    accounts: true,
   })
 
   // Sort MCP servers alphabetically for consistent display order
@@ -38,6 +39,14 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         ([_, item]) =>
           item.status === "failed" || item.status === "needs_auth" || item.status === "needs_client_registration",
       ).length,
+  )
+
+  const accountProviders = createMemo(() => Object.values(sync.data.accounts))
+  const totalAccountCount = createMemo(() =>
+    accountProviders().reduce((sum, p) => sum + p.accounts.length, 0)
+  )
+  const activeAccountCount = createMemo(() =>
+    accountProviders().reduce((sum, p) => sum + p.accounts.filter((a) => a.status === "active").length, 0)
   )
 
   const cost = createMemo(() => {
@@ -162,6 +171,70 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                           </span>
                         </text>
                       </box>
+                    )}
+                  </For>
+                </Show>
+              </box>
+            </Show>
+            <Show when={accountProviders().length > 0}>
+              <box>
+                <box
+                  flexDirection="row"
+                  gap={1}
+                  onMouseDown={() => totalAccountCount() > 2 && setExpanded("accounts", !expanded.accounts)}
+                >
+                  <Show when={totalAccountCount() > 2}>
+                    <text fg={theme.text}>{expanded.accounts ? "▼" : "▶"}</text>
+                  </Show>
+                  <text fg={theme.text}>
+                    <b>Accounts</b>
+                    <Show when={!expanded.accounts}>
+                      <span style={{ fg: theme.textMuted }}>
+                        {" "}
+                        ({activeAccountCount()}/{totalAccountCount()})
+                      </span>
+                    </Show>
+                  </text>
+                </box>
+                <Show when={totalAccountCount() <= 2 || expanded.accounts}>
+                  <For each={accountProviders()}>
+                    {(providerData) => (
+                      <For each={providerData.accounts}>
+                        {(account) => (
+                          <box flexDirection="row" gap={1}>
+                            <text
+                              flexShrink={0}
+                              style={{
+                                fg: (
+                                  {
+                                    active: theme.success,
+                                    cooldown: theme.warning,
+                                    disabled: theme.error,
+                                  } as Record<string, typeof theme.success>
+                                )[account.status],
+                              }}
+                            >
+                              {account.index === providerData.activeIndex ? "●" : "○"}
+                            </text>
+                            <text fg={theme.text} wrapMode="word">
+                              {account.label}{" "}
+                              <span style={{ fg: theme.textMuted }}>
+                                {account.requestCount} reqs{" "}
+                                <Switch>
+                                  <Match when={account.status === "active"}>active</Match>
+                                  <Match when={account.status === "cooldown"}>
+                                    cooldown
+                                    {account.cooldownUntil
+                                      ? ` (${Math.max(0, Math.ceil((account.cooldownUntil - Date.now()) / 1000))}s)`
+                                      : ""}
+                                  </Match>
+                                  <Match when={account.status === "disabled"}>disabled</Match>
+                                </Switch>
+                              </span>
+                            </text>
+                          </box>
+                        )}
+                      </For>
                     )}
                   </For>
                 </Show>

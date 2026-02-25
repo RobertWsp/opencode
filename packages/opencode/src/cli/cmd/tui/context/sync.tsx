@@ -72,6 +72,21 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       }
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
+      accounts: {
+        [providerID: string]: {
+          providerID: string
+          activeIndex: number
+          accounts: Array<{
+            index: number
+            label: string
+            status: "active" | "cooldown" | "disabled"
+            requestCount: number
+            tokenCount: number
+            switchCount: number
+            cooldownUntil?: number
+          }>
+        }
+      }
       path: Path
     }>({
       provider_next: {
@@ -99,6 +114,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       mcp_resource: {},
       formatter: [],
       vcs: undefined,
+      accounts: {},
       path: { state: "", config: "", worktree: "", directory: "" },
     })
 
@@ -340,6 +356,23 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           setStore("vcs", { branch: event.properties.branch })
           break
         }
+
+        case "account.switched": {
+          const { providerID, toIndex } = event.properties
+          setStore("accounts", providerID, "activeIndex", toIndex)
+          break
+        }
+        case "account.cooldown": {
+          const { providerID, accountIndex, cooldownUntil } = event.properties
+          setStore("accounts", providerID, "accounts", accountIndex, "cooldownUntil", cooldownUntil)
+          setStore("accounts", providerID, "accounts", accountIndex, "status", "cooldown")
+          break
+        }
+        case "account.status": {
+          const { providerID, accounts } = event.properties
+          setStore("accounts", providerID, reconcile({ providerID, activeIndex: 0, accounts }))
+          break
+        }
       }
     })
 
@@ -413,6 +446,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data))),
             sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!))),
+            sdk.client.provider.accounts().then((x) => setStore("accounts", reconcile(x.data ?? {}))),
           ]).then(() => {
             setStore("status", "complete")
           })

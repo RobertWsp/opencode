@@ -1,4 +1,7 @@
 import { Installation } from "@/installation"
+import fs from "fs"
+import path from "path"
+import { Global } from "@/global"
 import { Server } from "@/server/server"
 import { Log } from "@/util/log"
 import { Instance } from "@/project/instance"
@@ -42,6 +45,28 @@ let server: Bun.Server<BunWebSocketData> | undefined
 const eventStream = {
   abort: undefined as AbortController | undefined,
 }
+
+// Watch auth.json for cross-session sync — only reload when account keys change,
+// not on token refreshes (which only update access/expires fields).
+let debounce: ReturnType<typeof setTimeout> | undefined
+let lastKeys: string | undefined
+const authPath = path.join(Global.Path.data, "auth.json")
+fs.watchFile(authPath, { interval: 1000 }, () => {
+  clearTimeout(debounce)
+  debounce = setTimeout(async () => {
+    try {
+      const content = await Bun.file(authPath).text()
+      const keys = Object.keys(JSON.parse(content)).sort().join(",")
+      if (keys === lastKeys) return
+      lastKeys = keys
+    } catch {
+      // file may not exist or be mid-write
+    }
+    Log.Default.info("auth changed, reloading")
+    Config.global.reset()
+    await Instance.disposeAll()
+  }, 500)
+})
 
 const startEventStream = (directory: string) => {
   if (eventStream.abort) eventStream.abort.abort()
@@ -136,6 +161,8 @@ export const rpc = {
   },
   async shutdown() {
     Log.Default.info("worker shutting down")
+    fs.unwatchFile(authPath)
+    clearTimeout(debounce)
     if (eventStream.abort) eventStream.abort.abort()
     await Promise.race([
       Instance.disposeAll(),
