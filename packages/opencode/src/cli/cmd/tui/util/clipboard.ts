@@ -9,7 +9,23 @@ import { Filesystem } from "../../../../util/filesystem"
 
 const isWSL = platform() === "linux" && /wsl|microsoft/i.test(release())
 
-// WSLg Wayland socket lives at /mnt/wslg/runtime-dir, not XDG_RUNTIME_DIR
+async function convertBmpToPng(bmpData: Buffer): Promise<Buffer | undefined> {
+  const converter = Bun.which("ffmpeg") ? ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+    : Bun.which("magick") ? ["magick", "bmp:-", "png:-"]
+    : Bun.which("convert") ? ["convert", "bmp:-", "png:-"]
+    : undefined
+  if (!converter) return undefined
+  try {
+    const proc = Bun.spawn(converter, { stdin: "pipe", stdout: "pipe", stderr: "ignore" })
+    proc.stdin.write(bmpData)
+    proc.stdin.end()
+    const output = await new Response(proc.stdout).arrayBuffer()
+    await proc.exited
+    if (output.byteLength > 0) return Buffer.from(output)
+  } catch {}
+  return undefined
+}
+
 function wslgRuntimeDir(): string | undefined {
   if (!isWSL) return undefined
   const wslgDir = "/mnt/wslg/runtime-dir"
@@ -68,7 +84,8 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      const mimePriority = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]
+      const apiMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+      const mimePriority = [...apiMimes, "image/bmp"]
       const wlPasteAvailable = process.env["WAYLAND_DISPLAY"] && Bun.which("wl-paste")
       if (wlPasteAvailable) {
         const runtimeDir = wslgRuntimeDir()
@@ -83,6 +100,11 @@ export namespace Clipboard {
             if (available.includes(mime)) {
               const data = await $`wl-paste -t ${mime}`.env(wlEnv).nothrow().quiet().arrayBuffer()
               if (data && data.byteLength > 0) {
+                if (mime === "image/bmp") {
+                  const converted = await convertBmpToPng(Buffer.from(data))
+                  if (converted) return { data: converted.toString("base64"), mime: "image/png" }
+                  continue
+                }
                 return { data: Buffer.from(data).toString("base64"), mime }
               }
             }
@@ -99,6 +121,11 @@ export namespace Clipboard {
             if (available.includes(mime)) {
               const data = await $`xclip -selection clipboard -t ${mime} -o`.nothrow().quiet().arrayBuffer()
               if (data && data.byteLength > 0) {
+                if (mime === "image/bmp") {
+                  const converted = await convertBmpToPng(Buffer.from(data))
+                  if (converted) return { data: converted.toString("base64"), mime: "image/png" }
+                  continue
+                }
                 return { data: Buffer.from(data).toString("base64"), mime }
               }
             }
