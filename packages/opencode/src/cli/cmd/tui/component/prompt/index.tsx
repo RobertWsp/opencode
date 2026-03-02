@@ -248,6 +248,30 @@ export function Prompt(props: PromptProps) {
         },
       },
       {
+        title: "Paste image from clipboard",
+        description: "Read image data directly from clipboard (use when Ctrl+V doesn't work)",
+        value: "prompt.paste_image",
+        keybind: "input_paste_image",
+        category: "Prompt",
+        slash: {
+          name: "image",
+          aliases: ["paste-image"],
+        },
+        onSelect: async () => {
+          const content = await Clipboard.read()
+          if (!content) return
+          if (content.mime.startsWith("image/")) {
+            await pasteImage({
+              filename: "clipboard",
+              mime: content.mime,
+              content: content.data,
+            })
+          } else if (content.mime === "text/plain" && content.data) {
+            input.insertText(content.data)
+          }
+        },
+      },
+      {
         title: "Interrupt session",
         value: "session.interrupt",
         keybind: "session_interrupt",
@@ -943,7 +967,6 @@ export function Prompt(props: PromptProps) {
                     })
                     return
                   }
-                  // If no image, let the default paste behavior continue
                 }
                 if (keybind.match("input_clear", e) && store.prompt.input !== "") {
                   input.clear()
