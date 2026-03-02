@@ -4,6 +4,7 @@ import "opentui-spinner/solid"
 import path from "path"
 import { pathToFileURL } from "bun"
 import { existsSync } from "fs"
+import { platform, release } from "os"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
 import { useTheme } from "@tui/context/theme"
@@ -92,6 +93,44 @@ function shellTokens(s: string): string[] {
   }
   if (cur) tokens.push(cur)
   return tokens
+}
+
+// matches C:\, D:/, etc.
+const WIN_DRIVE_RE = /^[A-Za-z]:[\\\/]/
+// matches \\wsl$\distro\... and \\wsl.localhost\distro\...
+const WSL_UNC_RE = /^[\\\/]{2}wsl([.$]localhost)?[\\\/]/i
+
+function isWindowsPath(p: string): boolean {
+  return WIN_DRIVE_RE.test(p) || WSL_UNC_RE.test(p)
+}
+
+function isFilePath(p: string): boolean {
+  return p.startsWith("/") || p.startsWith("~/") || p.startsWith("file://") || isWindowsPath(p)
+}
+
+// C:\Users\foo → /mnt/c/Users/foo on WSL
+// \\wsl$\Ubuntu\home\foo → /home/foo on WSL
+// pass-through on win32 and other platforms
+function resolveDroppedPath(p: string): string {
+  if (!isWindowsPath(p)) return p
+  const os = platform()
+  if (os === "win32") return p
+
+  const rel = release().toLowerCase()
+  const isWSL = rel.includes("wsl") || rel.includes("microsoft")
+  if (!isWSL) return p
+
+  if (WSL_UNC_RE.test(p)) {
+    const normalized = p.replace(/\\/g, "/")
+    const parts = normalized.split("/").filter(Boolean)
+    // parts: ["wsl$" or "wsl.localhost", "<distro>", "home", "foo", ...]
+    const nativePath = "/" + parts.slice(2).join("/")
+    return nativePath
+  }
+
+  const drive = p[0].toLowerCase()
+  const rest = p.slice(2).replace(/\\/g, "/")
+  return `/mnt/${drive}${rest}`
 }
 
 export function Prompt(props: PromptProps) {
@@ -774,8 +813,8 @@ export function Prompt(props: PromptProps) {
   }
 
   async function pasteFile(filepath: string): Promise<void> {
-    // 1. Normalize path
     let fp = filepath
+    fp = resolveDroppedPath(fp)
     if (fp.startsWith("file://")) fp = decodeURIComponent(new URL(fp).pathname)
     if (fp.startsWith("~/")) fp = path.join(process.env["HOME"] ?? "~", fp.slice(2))
     if (!path.isAbsolute(fp)) fp = path.resolve(sync.data.path.directory || process.cwd(), fp)
@@ -1020,22 +1059,21 @@ export function Prompt(props: PromptProps) {
                   return
                 }
 
-                // trim ' from the beginning and end of the pasted content. just
-                // ' and nothing else
-                const filepath = pastedContent.replace(/^'+|'+$/g, "").replace(/\\ /g, " ")
+                const filepath = pastedContent.replace(/^['"]+|['"]+$/g, "").replace(/\\ /g, " ")
                 const lines = pastedContent
                   .split("\n")
                   .map((l) => l.trim())
                   .filter(Boolean)
                 if (lines.length > 1) {
-                  const fps = lines.map((l) => l.replace(/^'+|'+$/g, "").replace(/\\ /g, " "))
+                  const fps = lines.map((l) => l.replace(/^['"]+|['"]+$/g, "").replace(/\\ /g, " "))
                   const resolved = fps.map((fp) => {
-                    if (fp.startsWith("file://")) return decodeURIComponent(new URL(fp).pathname)
-                    if (fp.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", fp.slice(2))
-                    if (!path.isAbsolute(fp)) return path.resolve(sync.data.path.directory || process.cwd(), fp)
-                    return fp
+                    const normalized = resolveDroppedPath(fp)
+                    if (normalized.startsWith("file://")) return decodeURIComponent(new URL(normalized).pathname)
+                    if (normalized.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", normalized.slice(2))
+                    if (!path.isAbsolute(normalized)) return path.resolve(sync.data.path.directory || process.cwd(), normalized)
+                    return normalized
                   })
-                  if (fps.every((fp) => fp.startsWith("/") || fp.startsWith("~/") || fp.startsWith("file://"))) {
+                  if (fps.every((fp) => isFilePath(fp))) {
                     event.preventDefault()
                     const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
                     if (allExist.every(Boolean)) {
@@ -1070,13 +1108,14 @@ export function Prompt(props: PromptProps) {
                 // (quote_dropped_files = SpacesOnly/Posix/Windows modes)
                 if (lines.length === 1) {
                   const tokens = shellTokens(pastedContent)
-                  if (tokens.length > 1 && tokens.every((t) => t.startsWith("/") || t.startsWith("~/") || t.startsWith("file://"))) {
+                  if (tokens.length > 1 && tokens.every((t) => isFilePath(t))) {
                     event.preventDefault()
                     const resolved = tokens.map((t) => {
-                      if (t.startsWith("file://")) return decodeURIComponent(new URL(t).pathname)
-                      if (t.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", t.slice(2))
-                      if (!path.isAbsolute(t)) return path.resolve(sync.data.path.directory || process.cwd(), t)
-                      return t
+                      const normalized = resolveDroppedPath(t)
+                      if (normalized.startsWith("file://")) return decodeURIComponent(new URL(normalized).pathname)
+                      if (normalized.startsWith("~/")) return path.join(process.env["HOME"] ?? "~", normalized.slice(2))
+                      if (!path.isAbsolute(normalized)) return path.resolve(sync.data.path.directory || process.cwd(), normalized)
+                      return normalized
                     })
                     const allExist = await Promise.all(resolved.map((fp) => Filesystem.exists(fp)))
                     if (allExist.every(Boolean)) {
@@ -1100,12 +1139,13 @@ export function Prompt(props: PromptProps) {
                   // Single shell token that's a valid path (WezTerm DnD of 1 file)
                   if (tokens.length === 1) {
                     const t = tokens[0]
-                    if (t.startsWith("/") || t.startsWith("~/") || t.startsWith("file://")) {
-                      const fp = t.startsWith("file://")
-                        ? decodeURIComponent(new URL(t).pathname)
-                        : t.startsWith("~/")
-                          ? path.join(process.env["HOME"] ?? "~", t.slice(2))
-                          : t
+                    if (isFilePath(t)) {
+                      const normalized = resolveDroppedPath(t)
+                      const fp = normalized.startsWith("file://")
+                        ? decodeURIComponent(new URL(normalized).pathname)
+                        : normalized.startsWith("~/")
+                          ? path.join(process.env["HOME"] ?? "~", normalized.slice(2))
+                          : normalized
                       if (existsSync(fp)) {
                         event.preventDefault()
                         const mime = Filesystem.mimeType(fp)
@@ -1123,15 +1163,15 @@ export function Prompt(props: PromptProps) {
                     }
                   }
                 }
-                const isUrl = /^(https?):\/\//.test(filepath)
+                const resolvedFilepath = resolveDroppedPath(filepath)
+                const isUrl = /^(https?):\/\//.test(resolvedFilepath)
                 if (!isUrl) {
                   try {
-                    const mime = Filesystem.mimeType(filepath)
-                    const filename = path.basename(filepath)
-                    // Handle SVG as raw text content, not as base64 image
+                    const mime = Filesystem.mimeType(resolvedFilepath)
+                    const filename = path.basename(resolvedFilepath)
                     if (mime === "image/svg+xml") {
                       event.preventDefault()
-                      const content = await Filesystem.readText(filepath).catch(() => {})
+                      const content = await Filesystem.readText(resolvedFilepath).catch(() => {})
                       if (content) {
                         pasteText(content, `[SVG: ${filename ?? "image"}]`)
                         return
@@ -1139,7 +1179,7 @@ export function Prompt(props: PromptProps) {
                     }
                     if (mime.startsWith("image/")) {
                       event.preventDefault()
-                      const content = await Filesystem.readArrayBuffer(filepath)
+                      const content = await Filesystem.readArrayBuffer(resolvedFilepath)
                         .then((buffer) => Buffer.from(buffer).toString("base64"))
                         .catch(() => {})
                       if (content) {
@@ -1151,9 +1191,9 @@ export function Prompt(props: PromptProps) {
                         return
                       }
                     }
-                    const resolved = path.isAbsolute(filepath)
-                      ? filepath
-                      : path.resolve(sync.data.path.directory || process.cwd(), filepath)
+                    const resolved = path.isAbsolute(resolvedFilepath)
+                      ? resolvedFilepath
+                      : path.resolve(sync.data.path.directory || process.cwd(), resolvedFilepath)
                     if (existsSync(resolved)) {
                       event.preventDefault()
                       await pasteFile(resolved)
