@@ -1237,6 +1237,10 @@ export type KeybindsConfig = {
    */
   input_paste?: string
   /**
+   * Paste image from clipboard (useful on WSL where Ctrl+V may be intercepted)
+   */
+  input_paste_image?: string
+  /**
    * Submit input
    */
   input_submit?: string

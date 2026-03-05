@@ -4,7 +4,34 @@ import clipboardy from "clipboardy"
 import { lazy } from "../../../../util/lazy.js"
 import { tmpdir } from "os"
 import path from "path"
+import { existsSync } from "fs"
 import { Filesystem } from "../../../../util/filesystem"
+
+const isWSL = platform() === "linux" && /wsl|microsoft/i.test(release())
+
+async function convertBmpToPng(bmpData: Buffer): Promise<Buffer | undefined> {
+  const converter = Bun.which("ffmpeg") ? ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+    : Bun.which("magick") ? ["magick", "bmp:-", "png:-"]
+    : Bun.which("convert") ? ["convert", "bmp:-", "png:-"]
+    : undefined
+  if (!converter) return undefined
+  try {
+    const proc = Bun.spawn(converter, { stdin: "pipe", stdout: "pipe", stderr: "ignore" })
+    proc.stdin.write(bmpData)
+    proc.stdin.end()
+    const output = await new Response(proc.stdout).arrayBuffer()
+    await proc.exited
+    if (output.byteLength > 0) return Buffer.from(output)
+  } catch {}
+  return undefined
+}
+
+function wslgRuntimeDir(): string | undefined {
+  if (!isWSL) return undefined
+  const wslgDir = "/mnt/wslg/runtime-dir"
+  if (existsSync(wslgDir + "/wayland-0")) return wslgDir
+  return undefined
+}
 
 /**
  * Writes text to clipboard via OSC 52 escape sequence.
@@ -43,7 +70,8 @@ export namespace Clipboard {
       }
     }
 
-    if (os === "win32" || release().includes("WSL")) {
+    // PowerShell clipboard: only on native Windows (on WSL, processes can't access the Windows clipboard session)
+    if (os === "win32") {
       const script =
         "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }"
       const base64 = await $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text()
@@ -56,9 +84,13 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      const mimePriority = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]
-      if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-paste")) {
-        const types = await $`wl-paste --list-types`.nothrow().quiet().text()
+      const apiMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+      const mimePriority = [...apiMimes, "image/bmp"]
+      const wlPasteAvailable = process.env["WAYLAND_DISPLAY"] && Bun.which("wl-paste")
+      if (wlPasteAvailable) {
+        const runtimeDir = wslgRuntimeDir()
+        const wlEnv = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : process.env
+        const types = await $`wl-paste --list-types`.env(wlEnv).nothrow().quiet().text()
         if (types) {
           const available = types
             .split("\n")
@@ -66,8 +98,13 @@ export namespace Clipboard {
             .filter(Boolean)
           for (const mime of mimePriority) {
             if (available.includes(mime)) {
-              const data = await $`wl-paste -t ${mime}`.nothrow().quiet().arrayBuffer()
+              const data = await $`wl-paste -t ${mime}`.env(wlEnv).nothrow().quiet().arrayBuffer()
               if (data && data.byteLength > 0) {
+                if (mime === "image/bmp") {
+                  const converted = await convertBmpToPng(Buffer.from(data))
+                  if (converted) return { data: converted.toString("base64"), mime: "image/png" }
+                  continue
+                }
                 return { data: Buffer.from(data).toString("base64"), mime }
               }
             }
@@ -84,6 +121,11 @@ export namespace Clipboard {
             if (available.includes(mime)) {
               const data = await $`xclip -selection clipboard -t ${mime} -o`.nothrow().quiet().arrayBuffer()
               if (data && data.byteLength > 0) {
+                if (mime === "image/bmp") {
+                  const converted = await convertBmpToPng(Buffer.from(data))
+                  if (converted) return { data: converted.toString("base64"), mime: "image/png" }
+                  continue
+                }
                 return { data: Buffer.from(data).toString("base64"), mime }
               }
             }
@@ -112,8 +154,10 @@ export namespace Clipboard {
     if (os === "linux") {
       if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-copy")) {
         console.log("clipboard: using wl-copy")
+        const runtimeDir = wslgRuntimeDir()
+        const env = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : undefined
         return async (text: string) => {
-          const proc = Bun.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" })
+          const proc = Bun.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env })
           proc.stdin.write(text)
           proc.stdin.end()
           await proc.exited.catch(() => {})
