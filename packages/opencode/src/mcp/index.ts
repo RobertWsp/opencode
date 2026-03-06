@@ -164,6 +164,7 @@ export namespace MCP {
   // Store transports for OAuth servers to allow finishing auth
   type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
   const pendingOAuthTransports = new Map<string, TransportWithAuth>()
+  const activating = new Map<string, Promise<{ tools: string[] }>>()
 
   // Prompt cache types
   type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -265,6 +266,7 @@ export namespace MCP {
           }),
         ),
       )
+      activating.clear()
       pendingOAuthTransports.clear()
     },
   )
@@ -623,7 +625,100 @@ export namespace MCP {
     s.status[name] = { status: "disabled" }
   }
 
-  export async function tools() {
+  export type GatewayTool = {
+    id: string
+    description: string
+    execute: () => Promise<{ tools: string[] }>
+  }
+
+  function toGatewayTool(item: GatewayTool): Tool {
+    return dynamicTool({
+      description: item.description,
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      }),
+      execute: async () => {
+        const result = await item.execute()
+        const text = result.tools.length
+          ? `Activated MCP server. Available tools: ${result.tools.join(", ")}`
+          : "Activated MCP server. No tools available."
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+          metadata: {
+            tools: result.tools,
+          },
+        }
+      },
+    })
+  }
+
+  export async function gatewayTools(): Promise<GatewayTool[]> {
+    const s = await state()
+    const cfg = await Config.get()
+    const config = cfg.mcp ?? {}
+    const result: GatewayTool[] = []
+
+    for (const [name, entry] of Object.entries(config)) {
+      if (!isMcpConfigured(entry)) continue
+      if (entry.enabled === false) continue
+      const info = s.status[name]
+      if (info?.status === "connected") continue
+      if (info?.status === "failed") continue
+      if (info?.status === "needs_auth") continue
+      if (info?.status === "needs_client_registration") continue
+      const mcp = entry
+      const id = "mcp_activate_" + name.replace(/[^a-zA-Z0-9_-]/g, "_")
+
+      result.push({
+        id,
+        description: `Activate the '${name}' MCP server to access its tools`,
+        execute: async () => {
+          const now = await state()
+          if (now.status[name]?.status === "connected") {
+            const client = now.clients[name]
+            if (!client) return { tools: [] }
+            const listed = await client.listTools().catch(() => ({ tools: [] }))
+            return { tools: listed.tools.map((tool) => tool.name) }
+          }
+
+          let pending = activating.get(name)
+          if (!pending) {
+            pending = (async () => {
+              const created = await create(name, mcp)
+              const latest = await state()
+              latest.status[name] = created.status
+              if (!created.mcpClient) return { tools: [] }
+              const prev = latest.clients[name]
+              if (prev && prev !== created.mcpClient) {
+                await prev.close().catch((error) => {
+                  log.error("Failed to close existing MCP client", { name, error })
+                })
+              }
+              latest.clients[name] = created.mcpClient
+              const listed = await created.mcpClient.listTools().catch(() => ({ tools: [] }))
+              return { tools: listed.tools.map((tool) => tool.name) }
+            })().finally(() => {
+              activating.delete(name)
+            })
+            activating.set(name, pending)
+          }
+
+          return pending
+        },
+      })
+    }
+
+    return result
+  }
+
+  export async function connectedTools() {
     const result: Record<string, Tool> = {}
     const s = await state()
     const cfg = await Config.get()
@@ -661,6 +756,18 @@ export namespace MCP {
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
         result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
       }
+    }
+    return result
+  }
+
+  export async function tools() {
+    const result = await connectedTools()
+    for (const item of await gatewayTools()) {
+      if (result[item.id]) {
+        log.warn("Skipping duplicate MCP tool id", { id: item.id })
+        continue
+      }
+      result[item.id] = toGatewayTool(item)
     }
     return result
   }
