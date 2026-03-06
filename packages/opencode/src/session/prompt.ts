@@ -33,6 +33,7 @@ import { spawn } from "child_process"
 import { Command } from "../command"
 import { $, fileURLToPath, pathToFileURL } from "bun"
 import { ConfigMarkdown } from "../config/markdown"
+import { Config } from "../config/config"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/util/error"
 import { fn } from "@/util/fn"
@@ -827,7 +828,9 @@ export namespace SessionPrompt {
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    const cfg = await Config.get()
+    const mcpTools = cfg.experimental?.lazy_mcp ? await MCP.tools() : await MCP.connectedTools()
+    for (const [key, item] of Object.entries(mcpTools)) {
       const execute = item.execute
       if (!execute) continue
 
