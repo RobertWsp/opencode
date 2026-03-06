@@ -300,7 +300,10 @@ export namespace SessionProcessor {
                     sessionID: input.sessionID,
                     messageID: input.assistantMessage.parentID,
                   })
-                  if (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model })) {
+                  if (
+                    !input.assistantMessage.summary &&
+                    (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model }))
+                  ) {
                     needsCompaction = true
                   }
                   break
@@ -375,60 +378,65 @@ export namespace SessionProcessor {
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {
-              // TODO: Handle context overflow error
-            }
-            if (MessageV2.APIError.isInstance(error)) {
-              const pool = await Provider.getPool(input.model.providerID)
-              if (pool) {
-                const { activeIndex } = pool.stats()
-                if (error.data.statusCode === 429) {
-                  const retryAfterMs = error.data.responseHeaders?.["retry-after-ms"]
-                    ? Number.parseFloat(error.data.responseHeaders["retry-after-ms"])
-                    : error.data.responseHeaders?.["retry-after"]
-                      ? Number.parseFloat(error.data.responseHeaders["retry-after"]) * 1000
-                      : 60_000
-                  pool.cooldown(activeIndex, Date.now() + retryAfterMs)
-                  if (pool.hasHealthy() && switches < 3) {
-                    switches++
-                    await Provider.rotateAccount(input.model.providerID)
-                    if (pool.stats().activeIndex !== activeIndex) {
-                      await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
-                      continue
+              needsCompaction = true
+              Bus.publish(Session.Event.Error, {
+                sessionID: input.sessionID,
+                error,
+              })
+            } else {
+              if (MessageV2.APIError.isInstance(error)) {
+                const pool = await Provider.getPool(input.model.providerID)
+                if (pool) {
+                  const { activeIndex } = pool.stats()
+                  if (error.data.statusCode === 429) {
+                    const retryAfterMs = error.data.responseHeaders?.["retry-after-ms"]
+                      ? Number.parseFloat(error.data.responseHeaders["retry-after-ms"])
+                      : error.data.responseHeaders?.["retry-after"]
+                        ? Number.parseFloat(error.data.responseHeaders["retry-after"]) * 1000
+                        : 60_000
+                    pool.cooldown(activeIndex, Date.now() + retryAfterMs)
+                    if (pool.hasHealthy() && switches < 3) {
+                      switches++
+                      await Provider.rotateAccount(input.model.providerID)
+                      if (pool.stats().activeIndex !== activeIndex) {
+                        await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                        continue
+                      }
                     }
                   }
-                }
-                if (error.data.statusCode === 401) {
-                  pool.disable(activeIndex)
-                  if (pool.hasHealthy() && switches < 3) {
-                    switches++
-                    await Provider.rotateAccount(input.model.providerID)
-                    if (pool.stats().activeIndex !== activeIndex) {
-                      await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
-                      continue
+                  if (error.data.statusCode === 401) {
+                    pool.disable(activeIndex)
+                    if (pool.hasHealthy() && switches < 3) {
+                      switches++
+                      await Provider.rotateAccount(input.model.providerID)
+                      if (pool.stats().activeIndex !== activeIndex) {
+                        await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                        continue
+                      }
                     }
                   }
                 }
               }
-            }
-            const retry = SessionRetry.retryable(error)
-            if (retry !== undefined) {
-              attempt++
-              const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
-              SessionStatus.set(input.sessionID, {
-                type: "retry",
-                attempt,
-                message: retry,
-                next: Date.now() + delay,
+              const retry = SessionRetry.retryable(error)
+              if (retry !== undefined) {
+                attempt++
+                const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
+                SessionStatus.set(input.sessionID, {
+                  type: "retry",
+                  attempt,
+                  message: retry,
+                  next: Date.now() + delay,
+                })
+                await SessionRetry.sleep(delay, input.abort).catch(() => {})
+                continue
+              }
+              input.assistantMessage.error = error
+              Bus.publish(Session.Event.Error, {
+                sessionID: input.assistantMessage.sessionID,
+                error: input.assistantMessage.error,
               })
-              await SessionRetry.sleep(delay, input.abort).catch(() => {})
-              continue
+              SessionStatus.set(input.sessionID, { type: "idle" })
             }
-            input.assistantMessage.error = error
-            Bus.publish(Session.Event.Error, {
-              sessionID: input.assistantMessage.sessionID,
-              error: input.assistantMessage.error,
-            })
-            SessionStatus.set(input.sessionID, { type: "idle" })
           }
           if (snapshot) {
             const patch = await Snapshot.patch(snapshot)

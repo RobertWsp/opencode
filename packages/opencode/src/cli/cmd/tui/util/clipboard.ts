@@ -6,20 +6,23 @@ import { tmpdir } from "os"
 import path from "path"
 import { existsSync } from "fs"
 import { Filesystem } from "../../../../util/filesystem"
+import { Process } from "../../../../util/process"
+import { which } from "../../../../util/which"
 
 const isWSL = platform() === "linux" && /wsl|microsoft/i.test(release())
 
 async function convertBmpToPng(bmpData: Buffer): Promise<Buffer | undefined> {
-  const converter = Bun.which("ffmpeg") ? ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
-    : Bun.which("magick") ? ["magick", "bmp:-", "png:-"]
-    : Bun.which("convert") ? ["convert", "bmp:-", "png:-"]
+  const converter = which("ffmpeg") ? ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+    : which("magick") ? ["magick", "bmp:-", "png:-"]
+    : which("convert") ? ["convert", "bmp:-", "png:-"]
     : undefined
   if (!converter) return undefined
   try {
-    const proc = Bun.spawn(converter, { stdin: "pipe", stdout: "pipe", stderr: "ignore" })
+    const proc = Process.spawn(converter, { stdin: "pipe", stdout: "pipe", stderr: "ignore" })
+    if (!proc.stdin || !proc.stdout) return undefined
     proc.stdin.write(bmpData)
     proc.stdin.end()
-    const output = await new Response(proc.stdout).arrayBuffer()
+    const output = await new Response(proc.stdout as any).arrayBuffer()
     await proc.exited
     if (output.byteLength > 0) return Buffer.from(output)
   } catch {}
@@ -86,7 +89,7 @@ export namespace Clipboard {
     if (os === "linux") {
       const apiMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"]
       const mimePriority = [...apiMimes, "image/bmp"]
-      const wlPasteAvailable = process.env["WAYLAND_DISPLAY"] && Bun.which("wl-paste")
+      const wlPasteAvailable = process.env["WAYLAND_DISPLAY"] && which("wl-paste")
       if (wlPasteAvailable) {
         const runtimeDir = wslgRuntimeDir()
         const wlEnv = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : process.env
@@ -110,7 +113,7 @@ export namespace Clipboard {
             }
           }
         }
-      } else if (Bun.which("xclip")) {
+      } else if (which("xclip")) {
         const targets = await $`xclip -selection clipboard -t TARGETS -o`.nothrow().quiet().text()
         if (targets) {
           const available = targets
@@ -143,7 +146,7 @@ export namespace Clipboard {
   const getCopyMethod = lazy(() => {
     const os = platform()
 
-    if (os === "darwin" && Bun.which("osascript")) {
+    if (os === "darwin" && which("osascript")) {
       console.log("clipboard: using osascript")
       return async (text: string) => {
         const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
@@ -152,38 +155,41 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-copy")) {
+      if (process.env["WAYLAND_DISPLAY"] && which("wl-copy")) {
         console.log("clipboard: using wl-copy")
         const runtimeDir = wslgRuntimeDir()
-        const env = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : undefined
+        const env = runtimeDir ? { XDG_RUNTIME_DIR: runtimeDir } : undefined
         return async (text: string) => {
-          const proc = Bun.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env })
+          const proc = Process.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env })
+          if (!proc.stdin) return
           proc.stdin.write(text)
           proc.stdin.end()
           await proc.exited.catch(() => {})
         }
       }
-      if (Bun.which("xclip")) {
+      if (which("xclip")) {
         console.log("clipboard: using xclip")
         return async (text: string) => {
-          const proc = Bun.spawn(["xclip", "-selection", "clipboard"], {
+          const proc = Process.spawn(["xclip", "-selection", "clipboard"], {
             stdin: "pipe",
             stdout: "ignore",
             stderr: "ignore",
           })
+          if (!proc.stdin) return
           proc.stdin.write(text)
           proc.stdin.end()
           await proc.exited.catch(() => {})
         }
       }
-      if (Bun.which("xsel")) {
+      if (which("xsel")) {
         console.log("clipboard: using xsel")
         return async (text: string) => {
-          const proc = Bun.spawn(["xsel", "--clipboard", "--input"], {
+          const proc = Process.spawn(["xsel", "--clipboard", "--input"], {
             stdin: "pipe",
             stdout: "ignore",
             stderr: "ignore",
           })
+          if (!proc.stdin) return
           proc.stdin.write(text)
           proc.stdin.end()
           await proc.exited.catch(() => {})
@@ -195,7 +201,7 @@ export namespace Clipboard {
       console.log("clipboard: using powershell")
       return async (text: string) => {
         // Pipe via stdin to avoid PowerShell string interpolation ($env:FOO, $(), etc.)
-        const proc = Bun.spawn(
+        const proc = Process.spawn(
           [
             "powershell.exe",
             "-NonInteractive",
@@ -210,6 +216,7 @@ export namespace Clipboard {
           },
         )
 
+        if (!proc.stdin) return
         proc.stdin.write(text)
         proc.stdin.end()
         await proc.exited.catch(() => {})
