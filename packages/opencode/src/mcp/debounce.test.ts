@@ -55,25 +55,22 @@ const key = "__mcp_mock_state__"
 type Seed = Partial<Omit<Shared, "calls">> & { calls?: Partial<Shared["calls"]> }
 
 const root = globalThis as typeof globalThis & { [key: string]: Seed | undefined }
-const seed = root[key]
-const shared: Shared = {
-  calls: {
-    connect: seed?.calls?.connect ?? 0,
-    transport: seed?.calls?.transport ?? 0,
-    close: seed?.calls?.close ?? 0,
-    callTool: seed?.calls?.callTool ?? 0,
-    publish: seed?.calls?.publish ?? 0,
-  },
-  cfg: seed?.cfg ?? {},
-  mcpTools: seed?.mcpTools ?? [],
-  current: seed?.current,
-  dispose: seed?.dispose,
-  disposers: seed?.disposers ?? [],
-  delay: seed?.delay ?? 0,
-  fail: seed?.fail ?? "none",
-  handler: seed?.handler,
-}
-root[key] = shared
+const seed = (root[key] ??= {})
+
+seed.calls ??= {}
+seed.calls.connect ??= 0
+seed.calls.transport ??= 0
+seed.calls.close ??= 0
+seed.calls.callTool ??= 0
+seed.calls.publish ??= 0
+seed.cfg ??= {}
+seed.mcpTools ??= []
+seed.disposers ??= []
+seed.delay ??= 0
+seed.fail ??= "none"
+seed.handler ??= undefined
+
+const shared = seed as Shared
 
 mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class MockClient {
