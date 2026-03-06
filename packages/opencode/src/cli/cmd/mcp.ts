@@ -110,6 +110,12 @@ export const McpListCommand = cmd({
           } else if (status.status === "disabled") {
             statusIcon = "○"
             statusText = "disabled"
+          } else if (status.status === "pending") {
+            statusIcon = "○"
+            statusText = "pending"
+          } else if (status.status === "suspended") {
+            statusIcon = "⚠"
+            statusText = "suspended"
           } else if (status.status === "needs_auth") {
             statusIcon = "⚠"
             statusText = "needs authentication"
@@ -117,10 +123,13 @@ export const McpListCommand = cmd({
             statusIcon = "✗"
             statusText = "needs client registration"
             hint = "\n    " + status.error
-          } else {
+          } else if (status.status === "failed") {
             statusIcon = "✗"
             statusText = "failed"
             hint = "\n    " + status.error
+          } else {
+            const exhaustive: never = status
+            throw new Error(`Unhandled status: ${exhaustive}`)
           }
 
           const typeHint = serverConfig.type === "remote" ? serverConfig.url : serverConfig.command.join(" ")

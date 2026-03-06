@@ -102,6 +102,20 @@ export namespace MCP {
         .meta({
           ref: "MCPStatusNeedsClientRegistration",
         }),
+      z
+        .object({
+          status: z.literal("pending"),
+        })
+        .meta({
+          ref: "MCPStatusPending",
+        }),
+      z
+        .object({
+          status: z.literal("suspended"),
+        })
+        .meta({
+          ref: "MCPStatusSuspended",
+        }),
     ])
     .meta({
       ref: "MCPStatus",

@@ -982,7 +982,7 @@ export namespace Config {
               z.object({
                 key: z.string(),
                 label: z.string().optional(),
-              })
+              }),
             )
             .optional()
             .describe("Multiple API keys for account rotation"),
@@ -1180,6 +1180,7 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+          lazy_mcp: z.boolean().optional().describe("Enable lazy loading of MCP servers on-demand (default: false)"),
         })
         .optional(),
     })
