@@ -312,7 +312,7 @@ export namespace MCP {
       // Kill the full descendant tree first so the server exits promptly
       // and no processes are left behind.
       for (const client of Object.values(state.clients)) {
-        const pid = (client.transport as any)?.pid
+        const pid = (client.transport as { pid?: number })?.pid
         if (typeof pid !== "number") continue
         for (const dpid of await descendants(pid)) {
           try {
@@ -410,9 +410,9 @@ export namespace MCP {
       }
     }
     // Close existing client if present to prevent memory leaks
-    const existingClient = s.clients[name]
-    if (existingClient) {
-      await existingClient.close().catch((error) => {
+    const prev = s.clients[name]
+    if (prev) {
+      await prev.close().catch((error) => {
         log.error("Failed to close existing MCP client", { name, error })
       })
     }
@@ -480,14 +480,14 @@ export namespace MCP {
       ]
 
       let lastError: Error | undefined
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const timeout = mcp.timeout ?? DEFAULT_TIMEOUT
       for (const { name, transport } of transports) {
         try {
           const client = new Client({
             name: "opencode",
             version: Installation.VERSION,
           })
-          await withTimeout(client.connect(transport), connectTimeout)
+          await withTimeout(client.connect(transport), timeout)
           registerNotificationHandlers(client, key)
           mcpClient = client
           log.info("connected", { key, transport: name })
@@ -560,13 +560,13 @@ export namespace MCP {
         log.info(`mcp stderr: ${chunk.toString()}`, { key })
       })
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const timeout = mcp.timeout ?? DEFAULT_TIMEOUT
       try {
         const client = new Client({
           name: "opencode",
           version: Installation.VERSION,
         })
-        await withTimeout(client.connect(transport), connectTimeout)
+        await withTimeout(client.connect(transport), timeout)
         registerNotificationHandlers(client, key)
         mcpClient = client
         status = {
@@ -678,9 +678,9 @@ export namespace MCP {
     s.status[name] = result.status
     if (result.mcpClient) {
       // Close existing client if present to prevent memory leaks
-      const existingClient = s.clients[name]
-      if (existingClient) {
-        await existingClient.close().catch((error) => {
+      const prev = s.clients[name]
+      if (prev) {
+        await prev.close().catch((error) => {
           log.error("Failed to close existing MCP client", { name, error })
         })
       }
