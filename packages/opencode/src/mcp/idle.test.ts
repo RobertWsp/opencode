@@ -9,6 +9,7 @@ type Entry = {
 
 type Cfg = {
   experimental?: {
+    lazy_mcp?: boolean
     mcp_timeout?: number
   }
   mcp?: Record<string, Entry>
@@ -31,6 +32,7 @@ type Shared = {
   mcpTools: { name: string; inputSchema: { type: "object"; properties: Record<string, never> } }[]
   current: undefined | LocalState
   dispose: undefined | ((value: LocalState) => Promise<void>)
+  gen: number
   delay: number
 }
 
@@ -49,6 +51,7 @@ const state: Shared =
     mcpTools: [],
     current: undefined,
     dispose: undefined,
+    gen: 0,
     delay: 0,
   })
 
@@ -102,11 +105,15 @@ mock.module("../project/instance", () => ({
   Instance: {
     directory: "/tmp/opencode-test",
     state: (init: () => Promise<LocalState>, dispose?: (value: LocalState) => Promise<void>) => {
-      state.dispose = dispose
+      if (dispose !== undefined) state.dispose = dispose
+      let cur: LocalState | undefined
+      let g = -1
       return async () => {
-        if (state.current) return state.current
-        state.current = await init()
-        return state.current
+        if (cur && g === state.gen) return cur
+        cur = await init()
+        g = state.gen
+        if (dispose !== undefined) state.current = cur
+        return cur
       }
     },
     async disposeAll() {
@@ -114,7 +121,7 @@ mock.module("../project/instance", () => ({
         await state.dispose(state.current)
       }
       state.current = undefined
-      state.dispose = undefined
+      state.gen++
     },
   },
 }))
@@ -146,13 +153,16 @@ describe("MCP idle timeout", () => {
 
   test("suspends and closes MCP after idle timeout", async () => {
     state.cfg = {
-      experimental: { mcp_timeout: 50 },
+      experimental: { lazy_mcp: true, mcp_timeout: 50 },
       mcp: {
         idle: { type: "local", command: ["idle"] },
       },
     }
 
-    await MCP.status()
+    const gateway = await MCP.gatewayTools()
+    const activate = gateway.find((item) => item.id === "mcp_activate_idle")
+    expect(activate).toBeDefined()
+    await activate!.execute()
     await sleep(80)
 
     const status = await MCP.status()
@@ -186,13 +196,14 @@ describe("MCP idle timeout", () => {
 
   test("dispose clears idle timers", async () => {
     state.cfg = {
-      experimental: { mcp_timeout: 40 },
+      experimental: { lazy_mcp: true, mcp_timeout: 40 },
       mcp: {
         idle: { type: "local", command: ["idle"] },
       },
     }
 
-    await MCP.status()
+    const gateway = await MCP.gatewayTools()
+    await gateway[0].execute()
     await Instance.disposeAll()
     await sleep(70)
 
@@ -201,13 +212,14 @@ describe("MCP idle timeout", () => {
 
   test("idle disconnect sets suspended status", async () => {
     state.cfg = {
-      experimental: { mcp_timeout: 40 },
+      experimental: { lazy_mcp: true, mcp_timeout: 40 },
       mcp: {
         idle: { type: "local", command: ["idle"] },
       },
     }
 
-    await MCP.status()
+    const gateway = await MCP.gatewayTools()
+    await gateway[0].execute()
     await sleep(70)
 
     expect((await MCP.status()).idle).toEqual({ status: "suspended" })
@@ -216,13 +228,14 @@ describe("MCP idle timeout", () => {
 
   test("suspended MCP can be reactivated through gateway tool", async () => {
     state.cfg = {
-      experimental: { mcp_timeout: 40 },
+      experimental: { lazy_mcp: true, mcp_timeout: 40 },
       mcp: {
         idle: { type: "local", command: ["idle"] },
       },
     }
 
-    await MCP.status()
+    const initial = await MCP.gatewayTools()
+    await initial[0].execute()
     await sleep(70)
     expect((await MCP.status()).idle).toEqual({ status: "suspended" })
 

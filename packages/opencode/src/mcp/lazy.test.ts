@@ -30,6 +30,7 @@ type Shared = {
   mcpTools: { name: string; inputSchema: { type: "object"; properties: Record<string, never> } }[]
   current: undefined | LocalState
   dispose: undefined | ((value: LocalState) => Promise<void>)
+  gen: number
   delay: number
 }
 
@@ -48,6 +49,7 @@ const state: Shared =
     mcpTools: [],
     current: undefined,
     dispose: undefined,
+    gen: 0,
     delay: 0,
   })
 
@@ -101,11 +103,15 @@ mock.module("../project/instance", () => ({
   Instance: {
     directory: "/tmp/opencode-test",
     state: (init: () => Promise<LocalState>, dispose?: (value: LocalState) => Promise<void>) => {
-      state.dispose = dispose
+      if (dispose !== undefined) state.dispose = dispose
+      let cur: LocalState | undefined
+      let g = -1
       return async () => {
-        if (state.current) return state.current
-        state.current = await init()
-        return state.current
+        if (cur && g === state.gen) return cur
+        cur = await init()
+        g = state.gen
+        if (dispose !== undefined) state.current = cur
+        return cur
       }
     },
     async disposeAll() {
@@ -113,7 +119,7 @@ mock.module("../project/instance", () => ({
         await state.dispose(state.current)
       }
       state.current = undefined
-      state.dispose = undefined
+      state.gen++
     },
   },
 }))

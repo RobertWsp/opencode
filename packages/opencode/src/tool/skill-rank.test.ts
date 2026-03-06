@@ -121,5 +121,12 @@ describe("skill-rank", () => {
       rank(skills, [], "test")
       expect(JSON.stringify(skills)).toBe(original)
     })
+
+    it("multiple matching signals each contribute 2 points", () => {
+      const skills = [mockSkill("playwright", "node testing framework")]
+      const result = rank(skills, ["playwright", "node"], "")
+      // playwright matches name (+2), node matches description (+2) = 4 total
+      expect(result[0].score).toBe(4)
+    })
   })
 })

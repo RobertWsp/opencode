@@ -33,6 +33,7 @@ type Shared = {
   mcpTools: { name: string; inputSchema: { type: "object"; properties: Record<string, never> } }[]
   current: undefined | LocalState
   dispose: undefined | ((value: LocalState) => Promise<void>)
+  gen: number
   delay: number
   fail: "none" | "unauthorized" | "registration"
   handler: ((...args: unknown[]) => unknown) | undefined
@@ -54,6 +55,7 @@ seed.mcpTools ??= []
 seed.delay ??= 0
 seed.fail ??= "none"
 seed.handler ??= undefined
+seed.gen ??= 0
 
 const state = seed as Shared
 
@@ -155,11 +157,15 @@ mock.module("../project/instance", () => ({
   Instance: {
     directory: "/tmp/opencode-test",
     state: (init: () => Promise<LocalState>, dispose?: (value: LocalState) => Promise<void>) => {
-      state.dispose = dispose
+      if (dispose !== undefined) state.dispose = dispose
+      let cur: LocalState | undefined
+      let g = -1
       return async () => {
-        if (state.current) return state.current
-        state.current = await init()
-        return state.current
+        if (cur && g === state.gen) return cur
+        cur = await init()
+        g = state.gen
+        if (dispose !== undefined) state.current = cur
+        return cur
       }
     },
     async disposeAll() {
@@ -167,7 +173,7 @@ mock.module("../project/instance", () => ({
         await state.dispose(state.current)
       }
       state.current = undefined
-      state.dispose = undefined
+      state.gen++
     },
   },
 }))
@@ -201,13 +207,18 @@ describe("MCP lifecycle", () => {
 
   test("full idle timeout lifecycle", async () => {
     state.cfg = {
-      experimental: { lazy_mcp: false, mcp_timeout: 80 },
+      experimental: { lazy_mcp: true, mcp_timeout: 80 },
       mcp: {
         svc: { type: "local", command: ["svc"] },
       },
     }
 
-    await MCP.connect("svc")
+    const gateway = await MCP.gatewayTools()
+    const activate = gateway.find((item) => item.id === "mcp_activate_svc")
+    expect(activate).toBeDefined()
+    const result = await activate!.execute()
+    expect(result.tools).toEqual(["svc_tool"])
+
     let status = await MCP.status()
     expect(status.svc.status).toBe("connected")
 
@@ -215,11 +226,11 @@ describe("MCP lifecycle", () => {
     status = await MCP.status()
     expect(status.svc.status).toBe("suspended")
 
-    const gateway = await MCP.gatewayTools()
-    const activate = gateway.find((item) => item.id === "mcp_activate_svc")
-    expect(activate).toBeDefined()
-    const result = await activate!.execute()
-    expect(result.tools).toEqual(["svc_tool"])
+    const gateway2 = await MCP.gatewayTools()
+    const reactivate = gateway2.find((item) => item.id === "mcp_activate_svc")
+    expect(reactivate).toBeDefined()
+    const result2 = await reactivate!.execute()
+    expect(result2.tools).toEqual(["svc_tool"])
 
     status = await MCP.status()
     expect(status.svc.status).toBe("connected")

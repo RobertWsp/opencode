@@ -46,6 +46,7 @@ type Shared = {
   current: undefined | LocalState
   dispose: undefined | ((value: LocalState) => Promise<void>)
   disposers: Array<(value: any) => Promise<void>>
+  gen: number
   delay: number
   fail: "none" | "unauthorized" | "registration"
   handler: ((...args: unknown[]) => unknown) | undefined
@@ -66,6 +67,7 @@ seed.calls.publish ??= 0
 seed.cfg ??= {}
 seed.mcpTools ??= []
 seed.disposers ??= []
+seed.gen ??= 0
 seed.delay ??= 0
 seed.fail ??= "none"
 seed.handler ??= undefined
@@ -169,12 +171,16 @@ mock.module("../project/instance", () => ({
   Instance: {
     directory: "/tmp/opencode-test",
     state: (init: () => Promise<LocalState>, dispose?: (value: any) => Promise<void>) => {
-      shared.dispose = dispose
+      if (dispose !== undefined) shared.dispose = dispose
       if (dispose) shared.disposers.push(dispose)
+      let cur: LocalState | undefined
+      let g = -1
       return async () => {
-        if (shared.current) return shared.current
-        shared.current = await init()
-        return shared.current
+        if (cur && g === shared.gen) return cur
+        cur = await init()
+        g = shared.gen
+        if (dispose !== undefined) shared.current = cur
+        return cur
       }
     },
     async disposeAll() {
@@ -189,7 +195,7 @@ mock.module("../project/instance", () => ({
           await (client as any).close?.().catch(() => {})
       }
       shared.current = undefined
-      shared.dispose = undefined
+      shared.gen++
     },
   },
 }))

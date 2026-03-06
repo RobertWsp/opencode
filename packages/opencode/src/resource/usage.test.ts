@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import { Database as BunDatabase } from "bun:sqlite"
 import { drizzle } from "drizzle-orm/bun-sqlite"
-import { sql } from "drizzle-orm"
+import { sql, lt } from "drizzle-orm"
 import { ResourceUsageTable } from "./usage.sql"
 
 const TABLE_SQL = `CREATE TABLE resource_usage (
@@ -148,6 +148,50 @@ describe("usage", () => {
     upsert(db, "proj-1", "tool", "fast", 0)
     const rows = db.select().from(ResourceUsageTable).all()
     expect(rows[0].total_latency_ms).toBe(0)
+  })
+
+  it("prune deletes rows older than 90 days", () => {
+    const db = setup()
+    const now = Date.now()
+    const old = new Date(now - 91 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    const recent = new Date().toISOString().slice(0, 10)
+
+    db.insert(ResourceUsageTable)
+      .values({
+        id: `proj-1:tool:${old}`,
+        project_id: "proj-1",
+        resource_type: "tool",
+        resource_name: "old-tool",
+        call_count: 1,
+        total_latency_ms: 100,
+        last_used_at: now,
+        date: old,
+        time_created: now,
+        time_updated: now,
+      })
+      .run()
+
+    db.insert(ResourceUsageTable)
+      .values({
+        id: `proj-1:tool:${recent}`,
+        project_id: "proj-1",
+        resource_type: "tool",
+        resource_name: "recent-tool",
+        call_count: 1,
+        total_latency_ms: 100,
+        last_used_at: now,
+        date: recent,
+        time_created: now,
+        time_updated: now,
+      })
+      .run()
+
+    const cutoff = new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    db.delete(ResourceUsageTable).where(lt(ResourceUsageTable.date, cutoff)).run()
+
+    const rows = db.select().from(ResourceUsageTable).all()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].resource_name).toBe("recent-tool")
   })
 
   it("handles high call volume", () => {

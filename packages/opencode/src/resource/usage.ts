@@ -1,4 +1,4 @@
-import { Database, sql } from "@/storage/db"
+import { Database, sql, lt } from "@/storage/db"
 import { ResourceUsageTable } from "./usage.sql"
 
 export function record(pid: string, type: string, name: string, ms: number): void {
@@ -30,5 +30,9 @@ export function record(pid: string, type: string, name: string, ms: number): voi
         },
       })
       .run()
+    if (Math.random() < 0.01) {
+      const cutoff = new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      db.delete(ResourceUsageTable).where(lt(ResourceUsageTable.date, cutoff)).run()
+    }
   })
 }

@@ -1179,7 +1179,9 @@ export namespace Config {
             .int()
             .positive()
             .optional()
-            .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+            .describe(
+              "Idle timeout in milliseconds before a lazy MCP server is suspended when inactive (default: 300000 = 5 minutes). Only applies when lazy_mcp: true",
+            ),
           lazy_mcp: z.boolean().optional().describe("Enable lazy loading of MCP servers on-demand (default: false)"),
         })
         .optional(),

@@ -7,6 +7,8 @@ import { PermissionNext } from "../permission/next"
 import { Ripgrep } from "../file/ripgrep"
 import { iife } from "@/util/iife"
 import { rank } from "./skill-rank"
+import { MCP } from "../mcp"
+import { expand } from "../resource/signals"
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const skills = await Skill.all()
@@ -20,7 +22,8 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       })
     : skills
 
-  const ranked = rank(accessibleSkills, [], undefined)
+  const sigs = expand(await MCP.signals().catch(() => [] as string[]))
+  const ranked = rank(accessibleSkills, sigs, undefined)
   const top = ranked.slice(0, 10).map((s) => s.skill)
   const more = accessibleSkills.length > 10
 

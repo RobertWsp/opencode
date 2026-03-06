@@ -22,7 +22,6 @@ export function rank(skills: Skill.Info[], signals: string[] = [], query?: strin
     for (const sig of sigs) {
       if (name.includes(sig) || desc.includes(sig)) {
         score += 2
-        break
       }
     }
 

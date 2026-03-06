@@ -181,7 +181,7 @@ export namespace MCP {
   // Store transports for OAuth servers to allow finishing auth
   type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
   const pendingOAuthTransports = new Map<string, TransportWithAuth>()
-  const activating = new Map<string, Promise<{ tools: string[] }>>()
+  const activating = new Map<string, Promise<{ tools: string[]; error?: string }>>()
   type Store = {
     status: Record<string, Status>
     clients: Record<string, MCPClient>
@@ -279,7 +279,7 @@ export namespace MCP {
         status[key] = result.status
         if (result.mcpClient) {
           clients[key] = result.mcpClient
-          arm({ status, clients, timers }, key, timeout)
+          if (lazy) arm({ status, clients, timers }, key, timeout)
         }
       }),
     )
@@ -418,7 +418,7 @@ export namespace MCP {
     }
     s.clients[name] = result.mcpClient
     s.status[name] = result.status
-    arm(s, name, cfg.experimental?.mcp_timeout)
+    if (cfg.experimental?.lazy_mcp) arm(s, name, cfg.experimental?.mcp_timeout)
 
     return {
       status: s.status,
@@ -685,7 +685,7 @@ export namespace MCP {
         })
       }
       s.clients[name] = result.mcpClient
-      arm(s, name, cfg.experimental?.mcp_timeout)
+      if (cfg.experimental?.lazy_mcp) arm(s, name, cfg.experimental?.mcp_timeout)
     }
   }
 
@@ -705,7 +705,7 @@ export namespace MCP {
   export type GatewayTool = {
     id: string
     description: string
-    execute: () => Promise<{ tools: string[] }>
+    execute: () => Promise<{ tools: string[]; error?: string }>
   }
 
   function toGatewayTool(item: GatewayTool): Tool {
@@ -718,9 +718,11 @@ export namespace MCP {
       }),
       execute: async () => {
         const result = await item.execute()
-        const text = result.tools.length
-          ? `Activated MCP server. Available tools: ${result.tools.join(", ")}`
-          : "Activated MCP server. No tools available."
+        const text = result.error
+          ? result.error
+          : result.tools.length
+            ? `Activated MCP server. Available tools: ${result.tools.join(", ")}`
+            : "Activated MCP server. No tools available."
         return {
           content: [
             {
@@ -741,6 +743,7 @@ export namespace MCP {
     const cfg = await Config.get()
     const config = cfg.mcp ?? {}
     const result: GatewayTool[] = []
+    const searchCtx = new Map<string, string>()
 
     for (const [name, entry] of Object.entries(config)) {
       if (!isMcpConfigured(entry)) continue
@@ -752,6 +755,10 @@ export namespace MCP {
       if (info?.status === "needs_client_registration") continue
       const mcp = entry
       const id = "mcp_activate_" + name.replace(/[^a-zA-Z0-9_-]/g, "_")
+      const ctx = [name, ...(entry.type === "local" ? (entry.command ?? []) : [entry.url ?? ""])]
+        .join(" ")
+        .toLowerCase()
+      searchCtx.set(id, ctx)
 
       result.push({
         id,
@@ -775,13 +782,13 @@ export namespace MCP {
               if (!created.mcpClient) {
                 if (created.status.status === "needs_auth")
                   return {
-                    tools: [`[AUTH REQUIRED] MCP '${name}' requires authentication. Run: opencode mcp auth ${name}`],
+                    tools: [],
+                    error: `[AUTH REQUIRED] MCP '${name}' requires authentication. Run: opencode mcp auth ${name}`,
                   }
                 if (created.status.status === "needs_client_registration")
                   return {
-                    tools: [
-                      `[AUTH REQUIRED] MCP '${name}' requires a pre-registered client ID. Add clientId to your MCP config.`,
-                    ],
+                    tools: [],
+                    error: `[AUTH REQUIRED] MCP '${name}' requires a pre-registered client ID. Add clientId to your MCP config.`,
                   }
                 return { tools: [] }
               }
@@ -809,8 +816,8 @@ export namespace MCP {
     if (signals?.length) {
       const keywords = expand(signals)
       result.sort((a, b) => {
-        const al = a.id.toLowerCase()
-        const bl = b.id.toLowerCase()
+        const al = searchCtx.get(a.id) ?? a.id
+        const bl = searchCtx.get(b.id) ?? b.id
         const am = keywords.some((k) => al.includes(k)) ? 1 : 0
         const bm = keywords.some((k) => bl.includes(k)) ? 1 : 0
         return bm - am
