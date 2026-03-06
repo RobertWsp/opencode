@@ -128,7 +128,16 @@ export namespace MCP {
   function registerNotificationHandlers(client: MCPClient, serverName: string) {
     client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
       log.info("tools list changed notification received", { server: serverName })
-      Bus.publish(ToolsChanged, { server: serverName })
+      if (activating.size > 0) {
+        log.info("tools changed suppressed during activation", { server: serverName })
+        return
+      }
+      const s = await state()
+      clearTimeout(s.debounce)
+      s.debounce = setTimeout(() => {
+        s.debounce = undefined
+        Bus.publish(ToolsChanged, { server: serverName })
+      }, 500)
     })
   }
 
@@ -177,6 +186,7 @@ export namespace MCP {
     status: Record<string, Status>
     clients: Record<string, MCPClient>
     timers: Record<string, ReturnType<typeof setTimeout>>
+    debounce?: ReturnType<typeof setTimeout>
   }
 
   function clearTimer(s: Store, name: string) {
@@ -278,6 +288,7 @@ export namespace MCP {
       status,
       clients,
       timers,
+      debounce: undefined as ReturnType<typeof setTimeout> | undefined,
     }
   }
 
@@ -289,6 +300,8 @@ export namespace MCP {
       return init(config, lazy, cfg.experimental?.mcp_timeout)
     },
     async (state) => {
+      clearTimeout(state.debounce)
+      state.debounce = undefined
       for (const name of Object.keys(state.timers)) {
         clearTimer(state, name)
       }
@@ -759,7 +772,19 @@ export namespace MCP {
               const cfg = await Config.get()
               const latest = await state()
               latest.status[name] = created.status
-              if (!created.mcpClient) return { tools: [] }
+              if (!created.mcpClient) {
+                if (created.status.status === "needs_auth")
+                  return {
+                    tools: [`[AUTH REQUIRED] MCP '${name}' requires authentication. Run: opencode mcp auth ${name}`],
+                  }
+                if (created.status.status === "needs_client_registration")
+                  return {
+                    tools: [
+                      `[AUTH REQUIRED] MCP '${name}' requires a pre-registered client ID. Add clientId to your MCP config.`,
+                    ],
+                  }
+                return { tools: [] }
+              }
               const prev = latest.clients[name]
               if (prev && prev !== created.mcpClient) {
                 await prev.close().catch((error) => {

@@ -1,11 +1,22 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test"
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 
-type Entry = {
+type LocalEntry = {
   type: "local"
   command: string[]
   enabled?: boolean
   timeout?: number
 }
+
+type RemoteEntry = {
+  type: "remote"
+  url: string
+  enabled?: boolean
+  timeout?: number
+  oauth?: boolean | { clientId?: string }
+}
+
+type Entry = LocalEntry | RemoteEntry
 
 type Cfg = {
   experimental?: {
@@ -15,7 +26,7 @@ type Cfg = {
 }
 
 type LocalState = {
-  status: Record<string, { status: string }>
+  status: Record<string, { status: string; error?: string }>
   clients: Record<string, unknown>
 }
 
@@ -31,6 +42,8 @@ type Shared = {
   current: undefined | LocalState
   dispose: undefined | ((value: LocalState) => Promise<void>)
   delay: number
+  fail: "none" | "unauthorized" | "registration"
+  handler: ((...args: unknown[]) => unknown) | undefined
 }
 
 const key = "__mcp_mock_state__"
@@ -49,17 +62,23 @@ const state: Shared =
     current: undefined,
     dispose: undefined,
     delay: 0,
+    fail: "none",
+    handler: undefined,
   })
 
 mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class MockClient {
     async connect(_transport: unknown) {
       state.calls.connect += 1
+      if (state.fail === "unauthorized") throw new UnauthorizedError()
+      if (state.fail === "registration") throw new UnauthorizedError("dynamic client registration required")
       if (state.delay === 0) return
       await new Promise((resolve) => setTimeout(resolve, state.delay))
     }
 
-    setNotificationHandler(_schema: unknown, _fn: unknown) {}
+    setNotificationHandler(_schema: unknown, fn: (...args: unknown[]) => unknown) {
+      state.handler = fn
+    }
 
     async listTools() {
       return { tools: state.mcpTools }
@@ -88,6 +107,50 @@ mock.module("@modelcontextprotocol/sdk/client/stdio.js", () => ({
     constructor(_opts: unknown) {
       state.calls.transport += 1
     }
+  },
+}))
+
+mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
+  StreamableHTTPClientTransport: class MockStreamableHTTP {
+    constructor(_url: unknown, _opts?: unknown) {
+      state.calls.transport += 1
+    }
+  },
+}))
+
+mock.module("@modelcontextprotocol/sdk/client/sse.js", () => ({
+  SSEClientTransport: class MockSSE {
+    constructor(_url: unknown, _opts?: unknown) {
+      state.calls.transport += 1
+    }
+  },
+}))
+
+mock.module("./oauth-provider", () => ({
+  McpOAuthProvider: class MockOAuthProvider {
+    constructor(_key: string, _url: string, _opts?: unknown, _callbacks?: unknown) {}
+  },
+}))
+
+mock.module("./oauth-callback", () => ({
+  McpOAuthCallback: {},
+}))
+
+mock.module("./auth", () => ({
+  McpAuth: {
+    async get() {
+      return undefined
+    },
+    async updateOAuthState() {},
+    async getOAuthState() {
+      return undefined
+    },
+    async clearOAuthState() {},
+    async clearCodeVerifier() {},
+    async remove() {},
+    async isTokenExpired() {
+      return false
+    },
   },
 }))
 
@@ -129,6 +192,8 @@ describe("MCP.gatewayTools", () => {
     state.calls.callTool = 0
     state.cfg = {}
     state.delay = 0
+    state.fail = "none"
+    state.handler = undefined
     state.mcpTools = [
       {
         name: "mock_tool",
@@ -203,5 +268,108 @@ describe("MCP.gatewayTools", () => {
     expect(state.calls.connect).toBe(1)
     expect(state.calls.transport).toBe(1)
     expect((await MCP.status()).github).toEqual({ status: "connected" })
+  })
+})
+
+describe("OAuth gateway activation", () => {
+  beforeEach(async () => {
+    state.calls.connect = 0
+    state.calls.transport = 0
+    state.calls.close = 0
+    state.calls.callTool = 0
+    state.cfg = {}
+    state.delay = 0
+    state.fail = "none"
+    state.handler = undefined
+    state.mcpTools = [
+      {
+        name: "remote_tool",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]
+    await Instance.disposeAll()
+  })
+
+  test("returns actionable auth message for needs_auth remote MCP", async () => {
+    state.fail = "unauthorized"
+    state.cfg = {
+      experimental: { lazy_mcp: true },
+      mcp: {
+        acme: { type: "remote", url: "https://acme.example.com/mcp" },
+      },
+    }
+
+    const tools = await MCP.gatewayTools()
+    const activate = tools.find((t) => t.id === "mcp_activate_acme")
+    expect(activate).toBeDefined()
+
+    const result = await activate!.execute()
+    expect(result.tools).toHaveLength(1)
+    expect(result.tools[0]).toContain("opencode mcp auth acme")
+    expect(result.tools[0]).toContain("AUTH REQUIRED")
+  })
+
+  test("sets status to needs_auth after OAuth failure", async () => {
+    state.fail = "unauthorized"
+    state.cfg = {
+      experimental: { lazy_mcp: true },
+      mcp: {
+        acme: { type: "remote", url: "https://acme.example.com/mcp" },
+      },
+    }
+
+    const tools = await MCP.gatewayTools()
+    await tools[0].execute()
+
+    const status = await MCP.status()
+    expect(status.acme).toBeDefined()
+    expect(status.acme.status).toBe("needs_auth")
+  })
+
+  test("does not crash on OAuth failure", async () => {
+    state.fail = "unauthorized"
+    state.cfg = {
+      experimental: { lazy_mcp: true },
+      mcp: {
+        acme: { type: "remote", url: "https://acme.example.com/mcp" },
+      },
+    }
+
+    const tools = await MCP.gatewayTools()
+    const result = await tools[0].execute()
+    expect(result).toBeDefined()
+    expect(result.tools).toBeDefined()
+  })
+
+  test("needs_auth MCP excluded from subsequent gatewayTools calls", async () => {
+    state.fail = "unauthorized"
+    state.cfg = {
+      experimental: { lazy_mcp: true },
+      mcp: {
+        acme: { type: "remote", url: "https://acme.example.com/mcp" },
+      },
+    }
+
+    const first = await MCP.gatewayTools()
+    await first[0].execute()
+
+    const second = await MCP.gatewayTools()
+    expect(second).toHaveLength(0)
+  })
+
+  test("returns client registration message for needs_client_registration", async () => {
+    state.fail = "registration"
+    state.cfg = {
+      experimental: { lazy_mcp: true },
+      mcp: {
+        corp: { type: "remote", url: "https://corp.example.com/mcp" },
+      },
+    }
+
+    const tools = await MCP.gatewayTools()
+    const result = await tools[0].execute()
+    expect(result.tools).toHaveLength(1)
+    expect(result.tools[0]).toContain("AUTH REQUIRED")
+    expect(result.tools[0]).toContain("clientId")
   })
 })
