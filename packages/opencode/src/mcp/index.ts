@@ -196,40 +196,49 @@ export namespace MCP {
     return pids
   }
 
+  async function init(config: NonNullable<Config.Info["mcp"]>, lazy: boolean) {
+    const clients: Record<string, MCPClient> = {}
+    const status: Record<string, Status> = {}
+
+    await Promise.all(
+      Object.entries(config).map(async ([key, mcp]) => {
+        if (!isMcpConfigured(mcp)) {
+          log.error("Ignoring MCP config entry without type", { key })
+          return
+        }
+
+        if (mcp.enabled === false) {
+          status[key] = { status: "disabled" }
+          return
+        }
+
+        if (lazy) {
+          status[key] = { status: "pending" }
+          return
+        }
+
+        const result = await create(key, mcp).catch(() => undefined)
+        if (!result) return
+
+        status[key] = result.status
+        if (result.mcpClient) {
+          clients[key] = result.mcpClient
+        }
+      }),
+    )
+
+    return {
+      status,
+      clients,
+    }
+  }
+
   const state = Instance.state(
     async () => {
       const cfg = await Config.get()
       const config = cfg.mcp ?? {}
-      const clients: Record<string, MCPClient> = {}
-      const status: Record<string, Status> = {}
-
-      await Promise.all(
-        Object.entries(config).map(async ([key, mcp]) => {
-          if (!isMcpConfigured(mcp)) {
-            log.error("Ignoring MCP config entry without type", { key })
-            return
-          }
-
-          // If disabled by config, mark as disabled without trying to connect
-          if (mcp.enabled === false) {
-            status[key] = { status: "disabled" }
-            return
-          }
-
-          const result = await create(key, mcp).catch(() => undefined)
-          if (!result) return
-
-          status[key] = result.status
-
-          if (result.mcpClient) {
-            clients[key] = result.mcpClient
-          }
-        }),
-      )
-      return {
-        status,
-        clients,
-      }
+      const lazy = cfg.experimental?.lazy_mcp ?? false
+      return init(config, lazy)
     },
     async (state) => {
       // The MCP SDK only signals the direct child process on close.
