@@ -24,6 +24,21 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+export const KEYWORDS: Record<string, string[]> = {
+  "package.json": ["node", "npm", "javascript", "typescript", "js", "ts"],
+  "pyproject.toml": ["python", "pip", "py"],
+  "Cargo.toml": ["rust", "cargo"],
+  "go.mod": ["go", "golang"],
+  Dockerfile: ["docker", "container"],
+  "pom.xml": ["java", "maven"],
+  ".github": ["github", "ci", "actions"],
+  Makefile: ["make"],
+}
+
+export function expand(signals: string[]): string[] {
+  return signals.flatMap((s) => KEYWORDS[s] ?? [])
+}
+
 export async function scan(dir: string): Promise<{ signals: string[] }> {
   const checks = SIGNALS.map((file) => fileExists(`${dir}/${file}`).then((found) => (found ? file : null)))
   const results = await Promise.all(checks)

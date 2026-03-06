@@ -18,6 +18,7 @@ import { Installation } from "../installation"
 import { withTimeout } from "@/util/timeout"
 import { McpOAuthProvider } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
+import { expand, scan } from "../resource/signals"
 import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
@@ -320,6 +321,15 @@ export namespace MCP {
       pendingOAuthTransports.clear()
     },
   )
+
+  const cached = Instance.state(async () => {
+    const result = await scan(Instance.directory).catch(() => ({ signals: [] as string[] }))
+    return result.signals
+  })
+
+  export async function signals(): Promise<string[]> {
+    return cached()
+  }
 
   // Helper function to fetch prompts for a specific client
   async function fetchPromptsForClient(clientName: string, client: Client) {
@@ -713,7 +723,7 @@ export namespace MCP {
     })
   }
 
-  export async function gatewayTools(): Promise<GatewayTool[]> {
+  export async function gatewayTools(signals?: string[]): Promise<GatewayTool[]> {
     const s = await state()
     const cfg = await Config.get()
     const config = cfg.mcp ?? {}
@@ -771,6 +781,17 @@ export namespace MCP {
       })
     }
 
+    if (signals?.length) {
+      const keywords = expand(signals)
+      result.sort((a, b) => {
+        const al = a.id.toLowerCase()
+        const bl = b.id.toLowerCase()
+        const am = keywords.some((k) => al.includes(k)) ? 1 : 0
+        const bm = keywords.some((k) => bl.includes(k)) ? 1 : 0
+        return bm - am
+      })
+    }
+
     return result
   }
 
@@ -821,7 +842,8 @@ export namespace MCP {
 
   export async function tools() {
     const result = await connectedTools()
-    for (const item of await gatewayTools()) {
+    const sigs = await signals()
+    for (const item of await gatewayTools(sigs)) {
       if (result[item.id]) {
         log.warn("Skipping duplicate MCP tool id", { id: item.id })
         continue
