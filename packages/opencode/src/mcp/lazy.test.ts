@@ -24,6 +24,7 @@ type Shared = {
     connect: number
     transport: number
     close: number
+    callTool: number
   }
   cfg: Cfg
   mcpTools: { name: string; inputSchema: { type: "object"; properties: Record<string, never> } }[]
@@ -41,6 +42,7 @@ const state: Shared =
       connect: 0,
       transport: 0,
       close: 0,
+      callTool: 0,
     },
     cfg: {},
     mcpTools: [],
@@ -65,6 +67,14 @@ mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     async close() {
       state.calls.close += 1
+    }
+
+    async callTool() {
+      state.calls.callTool += 1
+      return {
+        content: [],
+        isError: false,
+      }
     }
   },
 }))
@@ -117,6 +127,7 @@ describe("MCP.state lazy startup", () => {
     state.calls.connect = 0
     state.calls.transport = 0
     state.calls.close = 0
+    state.calls.callTool = 0
     state.delay = 0
     state.mcpTools = []
     state.cfg = {}

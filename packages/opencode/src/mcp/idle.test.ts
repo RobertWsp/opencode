@@ -9,7 +9,7 @@ type Entry = {
 
 type Cfg = {
   experimental?: {
-    lazy_mcp?: boolean
+    mcp_timeout?: number
   }
   mcp?: Record<string, Entry>
 }
@@ -17,6 +17,7 @@ type Cfg = {
 type LocalState = {
   status: Record<string, { status: string }>
   clients: Record<string, unknown>
+  timers: Record<string, ReturnType<typeof setTimeout>>
 }
 
 type Shared = {
@@ -65,16 +66,16 @@ mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return { tools: state.mcpTools }
     }
 
-    async close() {
-      state.calls.close += 1
-    }
-
     async callTool() {
       state.calls.callTool += 1
       return {
         content: [],
         isError: false,
       }
+    }
+
+    async close() {
+      state.calls.close += 1
     }
   },
 }))
@@ -121,17 +122,19 @@ mock.module("../project/instance", () => ({
 const { MCP } = await import("./index")
 const { Instance } = await import("../project/instance")
 
-describe("MCP.gatewayTools", () => {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+describe("MCP idle timeout", () => {
   beforeEach(async () => {
     state.calls.connect = 0
     state.calls.transport = 0
     state.calls.close = 0
     state.calls.callTool = 0
-    state.cfg = {}
     state.delay = 0
+    state.cfg = {}
     state.mcpTools = [
       {
-        name: "mock_tool",
+        name: "idle_tool",
         inputSchema: {
           type: "object",
           properties: {},
@@ -141,67 +144,94 @@ describe("MCP.gatewayTools", () => {
     await Instance.disposeAll()
   })
 
-  test("returns one gateway tool per pending MCP", async () => {
+  test("suspends and closes MCP after idle timeout", async () => {
     state.cfg = {
-      experimental: { lazy_mcp: true },
+      experimental: { mcp_timeout: 50 },
       mcp: {
-        github: { type: "local", command: ["github"] },
-        slack: { type: "local", command: ["slack"] },
-        off: { type: "local", command: ["off"], enabled: false },
+        idle: { type: "local", command: ["idle"] },
       },
     }
 
-    const tools = await MCP.gatewayTools()
-    expect(tools.map((item) => item.id).sort()).toEqual(["mcp_activate_github", "mcp_activate_slack"])
+    await MCP.status()
+    await sleep(80)
+
+    const status = await MCP.status()
+    expect(status.idle).toEqual({ status: "suspended" })
+    expect(state.calls.close).toBe(1)
   })
 
-  test("execute activates pending MCP and returns available tool names", async () => {
+  test("tool call resets idle timer", async () => {
     state.cfg = {
-      experimental: { lazy_mcp: true },
+      experimental: { mcp_timeout: 60 },
       mcp: {
-        github: { type: "local", command: ["github"] },
+        idle: { type: "local", command: ["idle"] },
       },
     }
 
-    const tools = await MCP.gatewayTools()
-    const activate = tools.find((item) => item.id === "mcp_activate_github")
-    expect(activate).toBeDefined()
-    const result = await activate!.execute()
-    expect(result.tools).toEqual(["mock_tool"])
-    expect((await MCP.status()).github).toEqual({ status: "connected" })
+    await MCP.status()
+    await sleep(40)
+
+    const all = await MCP.connectedTools()
+    const tool = all.idle_idle_tool
+    if (!tool?.execute) throw new Error("missing execute")
+    await tool.execute({}, { toolCallId: "t1", messages: [] })
+    await sleep(40)
+
+    expect((await MCP.status()).idle).toEqual({ status: "connected" })
+
+    await sleep(40)
+    expect((await MCP.status()).idle).toEqual({ status: "suspended" })
+    expect(state.calls.callTool).toBe(1)
   })
 
-  test("after activation, gatewayTools no longer includes that MCP", async () => {
+  test("dispose clears idle timers", async () => {
     state.cfg = {
-      experimental: { lazy_mcp: true },
+      experimental: { mcp_timeout: 40 },
       mcp: {
-        github: { type: "local", command: ["github"] },
+        idle: { type: "local", command: ["idle"] },
       },
     }
 
-    const first = await MCP.gatewayTools()
-    await first[0].execute()
-    const second = await MCP.gatewayTools()
-    expect(second).toHaveLength(0)
+    await MCP.status()
+    await Instance.disposeAll()
+    await sleep(70)
+
+    expect(state.calls.close).toBe(1)
   })
 
-  test("concurrent calls to same gateway tool only connect once", async () => {
-    state.delay = 25
+  test("idle disconnect sets suspended status", async () => {
     state.cfg = {
-      experimental: { lazy_mcp: true },
+      experimental: { mcp_timeout: 40 },
       mcp: {
-        github: { type: "local", command: ["github"] },
+        idle: { type: "local", command: ["idle"] },
       },
     }
 
-    const tools = await MCP.gatewayTools()
-    const activate = tools.find((item) => item.id === "mcp_activate_github")!
-    const [a, b] = await Promise.all([activate.execute(), activate.execute()])
+    await MCP.status()
+    await sleep(70)
 
-    expect(a.tools).toEqual(["mock_tool"])
-    expect(b.tools).toEqual(["mock_tool"])
-    expect(state.calls.connect).toBe(1)
-    expect(state.calls.transport).toBe(1)
-    expect((await MCP.status()).github).toEqual({ status: "connected" })
+    expect((await MCP.status()).idle).toEqual({ status: "suspended" })
+    expect((await MCP.status()).idle).not.toEqual({ status: "disabled" })
+  })
+
+  test("suspended MCP can be reactivated through gateway tool", async () => {
+    state.cfg = {
+      experimental: { mcp_timeout: 40 },
+      mcp: {
+        idle: { type: "local", command: ["idle"] },
+      },
+    }
+
+    await MCP.status()
+    await sleep(70)
+    expect((await MCP.status()).idle).toEqual({ status: "suspended" })
+
+    const list = await MCP.gatewayTools()
+    const tool = list.find((item) => item.id === "mcp_activate_idle")
+    expect(tool).toBeDefined()
+    const result = await tool!.execute()
+
+    expect(result.tools).toEqual(["idle_tool"])
+    expect((await MCP.status()).idle).toEqual({ status: "connected" })
   })
 })

@@ -27,6 +27,7 @@ import open from "open"
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
   const DEFAULT_TIMEOUT = 30_000
+  const DEFAULT_IDLE_TIMEOUT = 300_000
 
   export const Resource = z
     .object({
@@ -131,7 +132,12 @@ export namespace MCP {
   }
 
   // Convert MCP tool definition to AI SDK Tool type
-  async function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Promise<Tool> {
+  async function convertMcpTool(
+    mcpTool: MCPToolDef,
+    client: MCPClient,
+    timeout?: number,
+    onUse?: () => Promise<void>,
+  ): Promise<Tool> {
     const inputSchema = mcpTool.inputSchema
 
     // Spread first, then override type to ensure it's always "object"
@@ -146,6 +152,7 @@ export namespace MCP {
       description: mcpTool.description ?? "",
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
+        await onUse?.()
         return client.callTool(
           {
             name: mcpTool.name,
@@ -165,6 +172,42 @@ export namespace MCP {
   type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
   const pendingOAuthTransports = new Map<string, TransportWithAuth>()
   const activating = new Map<string, Promise<{ tools: string[] }>>()
+  type Store = {
+    status: Record<string, Status>
+    clients: Record<string, MCPClient>
+    timers: Record<string, ReturnType<typeof setTimeout>>
+  }
+
+  function clearTimer(s: Store, name: string) {
+    const timer = s.timers[name]
+    if (!timer) return
+    clearTimeout(timer)
+    delete s.timers[name]
+  }
+
+  async function suspend(name: string) {
+    const s = await state()
+    clearTimer(s, name)
+    const client = s.clients[name]
+    if (!client) return
+    await client.close().catch((error) => {
+      log.error("Failed to close MCP client", { name, error })
+    })
+    delete s.clients[name]
+    s.status[name] = { status: "suspended" }
+  }
+
+  function arm(s: Store, name: string, timeout?: number) {
+    clearTimer(s, name)
+    const ms = timeout ?? DEFAULT_IDLE_TIMEOUT
+    s.timers[name] = setTimeout(() => {
+      void suspend(name)
+    }, ms)
+  }
+
+  async function touch(name: string, timeout?: number) {
+    arm(await state(), name, timeout)
+  }
 
   // Prompt cache types
   type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -197,9 +240,10 @@ export namespace MCP {
     return pids
   }
 
-  async function init(config: NonNullable<Config.Info["mcp"]>, lazy: boolean) {
+  async function init(config: NonNullable<Config.Info["mcp"]>, lazy: boolean, timeout?: number) {
     const clients: Record<string, MCPClient> = {}
     const status: Record<string, Status> = {}
+    const timers: Record<string, ReturnType<typeof setTimeout>> = {}
 
     await Promise.all(
       Object.entries(config).map(async ([key, mcp]) => {
@@ -224,6 +268,7 @@ export namespace MCP {
         status[key] = result.status
         if (result.mcpClient) {
           clients[key] = result.mcpClient
+          arm({ status, clients, timers }, key, timeout)
         }
       }),
     )
@@ -231,6 +276,7 @@ export namespace MCP {
     return {
       status,
       clients,
+      timers,
     }
   }
 
@@ -239,9 +285,13 @@ export namespace MCP {
       const cfg = await Config.get()
       const config = cfg.mcp ?? {}
       const lazy = cfg.experimental?.lazy_mcp ?? false
-      return init(config, lazy)
+      return init(config, lazy, cfg.experimental?.mcp_timeout)
     },
     async (state) => {
+      for (const name of Object.keys(state.timers)) {
+        clearTimer(state, name)
+      }
+
       // The MCP SDK only signals the direct child process on close.
       // Servers like chrome-devtools-mcp spawn grandchild processes
       // (e.g. Chrome) that the SDK never reaches, leaving them orphaned.
@@ -318,6 +368,7 @@ export namespace MCP {
 
   export async function add(name: string, mcp: Config.Mcp) {
     const s = await state()
+    const cfg = await Config.get()
     const result = await create(name, mcp)
     if (!result) {
       const status = {
@@ -344,6 +395,7 @@ export namespace MCP {
     }
     s.clients[name] = result.mcpClient
     s.status[name] = result.status
+    arm(s, name, cfg.experimental?.mcp_timeout)
 
     return {
       status: s.status,
@@ -610,11 +662,13 @@ export namespace MCP {
         })
       }
       s.clients[name] = result.mcpClient
+      arm(s, name, cfg.experimental?.mcp_timeout)
     }
   }
 
   export async function disconnect(name: string) {
     const s = await state()
+    clearTimer(s, name)
     const client = s.clients[name]
     if (client) {
       await client.close().catch((error) => {
@@ -692,6 +746,7 @@ export namespace MCP {
           if (!pending) {
             pending = (async () => {
               const created = await create(name, mcp)
+              const cfg = await Config.get()
               const latest = await state()
               latest.status[name] = created.status
               if (!created.mcpClient) return { tools: [] }
@@ -702,6 +757,7 @@ export namespace MCP {
                 })
               }
               latest.clients[name] = created.mcpClient
+              arm(latest, name, cfg.experimental?.mcp_timeout)
               const listed = await created.mcpClient.listTools().catch(() => ({ tools: [] }))
               return { tools: listed.tools.map((tool) => tool.name) }
             })().finally(() => {
@@ -739,6 +795,7 @@ export namespace MCP {
             error: e instanceof Error ? e.message : String(e),
           }
           s.status[clientName] = failedStatus
+          clearTimer(s, clientName)
           delete s.clients[clientName]
           return undefined
         })
@@ -754,7 +811,9 @@ export namespace MCP {
       for (const mcpTool of toolsResult.tools) {
         const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
+        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout, () =>
+          touch(clientName, defaultTimeout),
+        )
       }
     }
     return result
