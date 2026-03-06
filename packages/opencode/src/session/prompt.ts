@@ -46,6 +46,7 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { record } from "@/resource/usage"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -441,11 +442,15 @@ export namespace SessionPrompt {
             })
           },
         }
+        const start = Date.now()
         const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
           executionError = error
           log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
           return undefined
         })
+        try {
+          record(Instance.project.id, "task", task.agent, Date.now() - start)
+        } catch {}
         const attachments = result?.attachments?.map((attachment) => ({
           ...attachment,
           id: Identifier.ascending("part"),
@@ -803,7 +808,11 @@ export namespace SessionPrompt {
               args,
             },
           )
+          const start = Date.now()
           const result = await item.execute(args, ctx)
+          try {
+            record(Instance.project.id, "tool", item.id, Date.now() - start)
+          } catch {}
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -859,7 +868,11 @@ export namespace SessionPrompt {
           always: ["*"],
         })
 
+        const start = Date.now()
         const result = await execute(args, opts)
+        try {
+          record(Instance.project.id, "mcp", key, Date.now() - start)
+        } catch {}
 
         await Plugin.trigger(
           "tool.execute.after",
