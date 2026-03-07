@@ -2163,8 +2163,38 @@ export default function Layout(props: ParentProps) {
             "xl:border-l xl:rounded-tl-[12px]": !layout.sidebar.opened(),
           }}
         >
-          <Show when={!autoselecting()} fallback={<div class="size-full" />}>
-            {props.children}
+          <main
+            classList={{
+              "size-full overflow-x-hidden flex flex-col items-start contain-strict border-t border-border-weak-base bg-background-base xl:border-l xl:rounded-tl-[12px]": true,
+            }}
+          >
+            <Show when={!autoselecting()} fallback={<div class="size-full" />}>
+              {props.children}
+            </Show>
+          </main>
+        </div>
+
+        <div
+          classList={{
+            "hidden xl:flex absolute inset-y-0 left-16 z-30": true,
+            "opacity-100 translate-x-0 pointer-events-auto": peeked() && !layout.sidebar.opened(),
+            "opacity-0 -translate-x-2 pointer-events-none": !peeked() || layout.sidebar.opened(),
+            "transition-[opacity,transform] motion-reduce:transition-none": true,
+            "duration-180 ease-out": peeked() && !layout.sidebar.opened(),
+            "duration-120 ease-in": !peeked() || layout.sidebar.opened(),
+          }}
+          onMouseMove={disarm}
+          onMouseEnter={() => {
+            disarm()
+            aim.reset()
+          }}
+          onPointerDown={disarm}
+          onMouseLeave={() => {
+            arm()
+          }}
+        >
+          <Show when={peek()} keyed>
+            {(project) => <SidebarPanel project={project} merged={false} />}
           </Show>
         </main>
       </div>
