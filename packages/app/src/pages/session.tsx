@@ -72,6 +72,7 @@ export default function Page() {
 
   const [ui, setUi] = createStore({
     pendingMessage: undefined as string | undefined,
+    reviewSnap: false,
     scrollGesture: 0,
     scroll: {
       overflow: false,
@@ -246,6 +247,21 @@ export default function Page() {
     }
     return key
   }, sessionKey())
+
+  let reviewFrame: number | undefined
+
+  createComputed((prev) => {
+    const open = desktopReviewOpen()
+    if (prev === undefined || prev === open) return open
+
+    if (reviewFrame !== undefined) cancelAnimationFrame(reviewFrame)
+    setUi("reviewSnap", true)
+    reviewFrame = requestAnimationFrame(() => {
+      reviewFrame = undefined
+      setUi("reviewSnap", false)
+    })
+    return open
+  }, desktopReviewOpen())
 
   const turnDiffs = createMemo(() => lastUserMessage()?.summary?.diffs ?? [])
   const reviewDiffs = createMemo(() => (store.changes === "session" ? diffs() : turnDiffs()))
@@ -1005,6 +1021,7 @@ export default function Page() {
   onCleanup(() => {
     document.removeEventListener("keydown", handleKeyDown)
     scrollSpy.destroy()
+    if (reviewFrame !== undefined) cancelAnimationFrame(reviewFrame)
     if (scrollStateFrame !== undefined) cancelAnimationFrame(scrollStateFrame)
     if (historyFillFrame !== undefined) cancelAnimationFrame(historyFillFrame)
   })
@@ -1027,7 +1044,7 @@ export default function Page() {
           classList={{
             "@container relative shrink-0 flex flex-col min-h-0 h-full bg-background-stronger flex-1 md:flex-none": true,
             "transition-[width] duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
-              !size.active(),
+              !size.active() && !ui.reviewSnap,
           }}
           style={{
             width: sessionPanelWidth(),
@@ -1142,6 +1159,7 @@ export default function Page() {
           reviewPanel={reviewPanel}
           activeDiff={tree.activeDiff}
           focusReviewDiff={focusReviewDiff}
+          reviewSnap={ui.reviewSnap}
           size={size}
         />
       </div>
