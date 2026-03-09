@@ -279,7 +279,6 @@ export namespace MCP {
         status[key] = result.status
         if (result.mcpClient) {
           clients[key] = result.mcpClient
-          if (lazy) arm({ status, clients, timers }, key, timeout)
         }
       }),
     )
