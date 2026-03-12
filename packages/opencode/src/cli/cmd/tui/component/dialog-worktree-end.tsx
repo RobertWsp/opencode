@@ -1,6 +1,6 @@
-import { TextAttributes } from "@opentui/core"
-import { useKeyboard } from "@opentui/solid"
-import { createMemo, createSignal, onMount, Show, Switch, Match } from "solid-js"
+import { TextAttributes, ScrollBoxRenderable } from "@opentui/core"
+import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
+import { createMemo, createSignal, onMount, Show, Switch, Match, For } from "solid-js"
 import { useDialog } from "@tui/ui/dialog"
 import { useToast } from "../ui/toast"
 import { useSDK } from "../context/sdk"
@@ -11,6 +11,7 @@ type Phase =
   | { type: "clean" }
   | { type: "menu" }
   | { type: "review"; output: string }
+  | { type: "selectTarget"; branches: string[]; idx: number }
   | { type: "pushing"; target: "pr" | "only" }
   | { type: "pushed"; output: string }
   | { type: "confirm" }
@@ -30,6 +31,8 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
   const [selected, setSelected] = createSignal(0)
   const [err, setErr] = createSignal("")
   const [remote, setRemote] = createSignal(true)
+  const dims = useTerminalDimensions()
+  const [scroll, setScroll] = createSignal<ScrollBoxRenderable>()
 
   const options = [
     { title: "Review Changes", value: "review" },
@@ -92,7 +95,40 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     setPhase({ type: "review", output: output || "No changes" })
   }
 
-  async function push(mode: "pr" | "only") {
+  function pick() {
+    const list = Bun.spawnSync(["git", "branch", "-a", "--format=%(refname:short)"], { cwd: dir() })
+      .stdout.toString()
+      .trim()
+      .split("\n")
+      .filter((b) => b && !b.includes("HEAD"))
+      .filter((b, i, arr) => arr.indexOf(b) === i)
+    setPhase({
+      type: "selectTarget",
+      branches: list,
+      idx: Math.max(
+        0,
+        list.findIndex((b) => b === base() || b === `origin/${base()}`),
+      ),
+    })
+  }
+
+  function move(n: number) {
+    const p = phase()
+    if (p.type !== "selectTarget") return
+    const len = p.branches.length
+    if (!len) return
+    const next = (p.idx + n + len) % len
+    setPhase({ ...p, idx: next })
+    const s = scroll()
+    if (!s) return
+    const child = s.getChildren().find((c) => c.id === String(next))
+    if (!child) return
+    const y = child.y - s.y
+    if (y >= s.height) s.scrollBy(y - s.height + 1)
+    if (y < 0) s.scrollBy(y)
+  }
+
+  async function push(mode: "pr" | "only", target?: string) {
     setPhase({ type: "pushing", target: mode })
     setErr("")
 
@@ -115,8 +151,8 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     }
 
     if (mode === "pr") {
-      const url = extractRemote(out, branch())
-      setPhase({ type: "pushed", output: url || `Pushed ${branch()}. Create PR manually on remote.` })
+      const url = extractRemote(out, branch(), target)
+      setPhase({ type: "pushed", output: url || `Pushed ${branch()} → ${target ?? base()}. Create PR manually.` })
       return
     }
 
@@ -150,6 +186,17 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
       return
     }
 
+    if (p.type === "selectTarget") {
+      if (evt.name === "up" || (evt.ctrl && evt.name === "p")) return move(-1)
+      if (evt.name === "down" || (evt.ctrl && evt.name === "n")) return move(1)
+      if (evt.name === "return") return void push("pr", p.branches[p.idx])
+      if (evt.name === "escape") {
+        setPhase({ type: "menu" })
+        return
+      }
+      return
+    }
+
     if (p.type !== "menu") return
 
     if (evt.name === "up" || (evt.ctrl && evt.name === "p")) {
@@ -164,7 +211,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     if (evt.name === "return") {
       const opt = opts()[selected()]
       if (opt.value === "review") return review()
-      if (opt.value === "pr") return void push("pr")
+      if (opt.value === "pr") return pick()
       if (opt.value === "push") return void push("only")
       if (opt.value === "keep") {
         dialog.clear()
@@ -218,7 +265,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
                   onMouseUp={() => {
                     setSelected(i)
                     if (opt.value === "review") return review()
-                    if (opt.value === "pr") return void push("pr")
+                    if (opt.value === "pr") return pick()
                     if (opt.value === "push") return void push("only")
                     if (opt.value === "keep") {
                       dialog.clear()
@@ -239,6 +286,45 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
               ))}
             </box>
           </Show>
+        </Match>
+
+        <Match when={phase().type === "selectTarget"}>
+          <box gap={1}>
+            <text fg={theme.textMuted} attributes={TextAttributes.BOLD}>
+              Target branch for PR:
+            </text>
+            <scrollbox
+              ref={(r: ScrollBoxRenderable) => setScroll(r)}
+              maxHeight={Math.min(
+                (phase() as Extract<Phase, { type: "selectTarget" }>).branches.length,
+                Math.floor(dims().height / 2) - 6,
+              )}
+              scrollbarOptions={{ visible: false }}
+            >
+              <For each={(phase() as Extract<Phase, { type: "selectTarget" }>).branches}>
+                {(b, i) => (
+                  <box id={String(i())} flexDirection="row">
+                    <text
+                      fg={
+                        i() === (phase() as Extract<Phase, { type: "selectTarget" }>).idx
+                          ? theme.primary
+                          : theme.textMuted
+                      }
+                      attributes={
+                        i() === (phase() as Extract<Phase, { type: "selectTarget" }>).idx
+                          ? TextAttributes.BOLD
+                          : undefined
+                      }
+                    >
+                      {i() === (phase() as Extract<Phase, { type: "selectTarget" }>).idx ? "\u276F " : "  "}
+                      {b}
+                    </text>
+                  </box>
+                )}
+              </For>
+            </scrollbox>
+            <text fg={theme.textMuted}>enter select · esc back</text>
+          </box>
         </Match>
 
         <Match when={phase().type === "review"}>
@@ -281,8 +367,12 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
   )
 }
 
-function extractRemote(output: string, branch: string): string | undefined {
+function extractRemote(output: string, branch: string, target?: string): string | undefined {
   const match = output.match(/https?:\/\/\S+/)
+  if (match && target) {
+    const repo = match[0].replace(/\/(pull|compare)\/.*$/, "")
+    return `${repo}/compare/${target}...${branch}?expand=1`
+  }
   if (match) return match[0]
   const remote = output.match(/remote:\s*(https?:\/\/\S+)/)
   if (remote) return remote[1]

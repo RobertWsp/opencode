@@ -373,6 +373,12 @@ export namespace Session {
     return fromRow(row)
   })
 
+  export async function worktree(sessionID: string) {
+    const s = await get(sessionID)
+    if (!s?.workspaceID) return undefined
+    return Workspace.get(s.workspaceID)
+  }
+
   export const share = fn(Identifier.schema("session"), async (id) => {
     const cfg = await Config.get()
     if (cfg.share === "disabled") {

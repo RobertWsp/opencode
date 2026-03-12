@@ -113,6 +113,27 @@ describe("worktree edge cases", () => {
     })
   })
 
+  test("createFromInfo handles occupied path gracefully", async () => {
+    await using tmp = await fixture()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const info = await Worktree.makeWorktreeInfo("occupied")
+        await fs.mkdir(info.directory, { recursive: true })
+
+        const next = await Worktree.makeWorktreeInfo("occupied")
+        expect(next.name).toBe("occupied-2")
+
+        const boot = await Worktree.createFromInfo(next)
+        boot()
+        await ready(next.directory)
+
+        await Worktree.remove({ directory: next.directory })
+        await fs.rm(info.directory, { recursive: true, force: true })
+      },
+    })
+  })
+
   test("pruneOrphans removes workspace rows for deleted directories", async () => {
     await using tmp = await fixture()
     await Instance.provide({
@@ -138,6 +159,29 @@ describe("worktree edge cases", () => {
 
         const got = await Workspace.get(id)
         expect(got).toBeUndefined()
+      },
+    })
+  })
+
+  test("pruneOrphans keeps workspace rows for existing directories", async () => {
+    await using tmp = await fixture()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const ws = await Workspace.create({
+          type: "worktree",
+          projectID: Instance.project.id,
+          branch: null,
+          extra: null,
+        })
+        await ready(ws.directory!)
+
+        await Workspace.pruneOrphans(Instance.project)
+
+        const got = await Workspace.get(ws.id)
+        expect(got?.id).toBe(ws.id)
+
+        await Workspace.remove(ws.id)
       },
     })
   })
@@ -168,6 +212,8 @@ describe("worktree edge cases", () => {
   })
 
   test.skip("remove blocks unpushed commits with WorkspaceDirtyError (blocked by git log --not --remotes semantics)", () => {})
+
+  test.skip("locked worktree is documented but requires manual git state manipulation", () => {})
 
   test("force remove succeeds for dirty worktrees", async () => {
     await using tmp = await fixture()
@@ -234,6 +280,96 @@ describe("worktree edge cases", () => {
     })
   })
 
+  test("worktree branch with no new commits has empty unpushed count", async () => {
+    await using tmp = await fixture()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const info = await Worktree.makeWorktreeInfo("no-new-commits")
+        const boot = await Worktree.createFromInfo(info)
+        boot()
+        await ready(info.directory)
+
+        const got = await Worktree.hasUnpushedWork(info.directory)
+        expect(got.unpushed).toBe(0)
+        expect(got.dirty).toBe(false)
+
+        await Worktree.remove({ directory: info.directory })
+      },
+    })
+  })
+
+  test("createFromInfo with nonexistent base branch throws clear error", async () => {
+    await using tmp = await fixture()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const info = await Worktree.makeWorktreeInfo("bad-base")
+        const err = await Worktree.createFromInfo(info, undefined, "nonexistent-branch-xyz").catch((err) => err)
+        expect(err).toBeInstanceOf(Worktree.CreateFailedError)
+        if (!(err instanceof Worktree.CreateFailedError)) throw err
+        expect(err.message.length > 0).toBe(true)
+      },
+    })
+  })
+
+  test("resolveDefaultBranch handles missing remote HEAD gracefully", async () => {
+    await using tmp = await fixture()
+    const remote = path.join(tmp.path, "remote.git")
+    await $`git init --bare ${remote}`.cwd(tmp.path).quiet()
+    await $`git remote add origin ${remote}`.cwd(tmp.path).quiet()
+
+    const global = process.env.GIT_CONFIG_GLOBAL
+    const system = process.env.GIT_CONFIG_NOSYSTEM
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null"
+    process.env.GIT_CONFIG_NOSYSTEM = "1"
+    const err = await Worktree.resolveDefaultBranch(tmp.path).catch((err) => err)
+    if (global === undefined) delete process.env.GIT_CONFIG_GLOBAL
+    if (global !== undefined) process.env.GIT_CONFIG_GLOBAL = global
+    if (system === undefined) delete process.env.GIT_CONFIG_NOSYSTEM
+    if (system !== undefined) process.env.GIT_CONFIG_NOSYSTEM = system
+
+    expect(err).toBeInstanceOf(Error)
+    if (!(err instanceof Error)) throw err
+    expect(err.message).toBe("Cannot detect default branch. Run: git remote set-head origin --auto")
+  })
+
+  test("worktree creation works in path with spaces", async () => {
+    await using tmp = await tmpdir<string>({
+      init: async (dir) => {
+        const target = path.join(dir, "repo with spaces")
+        await fs.mkdir(target)
+        await $`git init`.cwd(target).quiet()
+        await $`git config core.fsmonitor false`.cwd(target).quiet()
+        await $`git commit --allow-empty -m "root commit"`.cwd(target).quiet()
+        return target
+      },
+      dispose: async (dir) => {
+        const target = path.join(dir, "repo with spaces")
+        await $`git worktree prune`.cwd(target).quiet().nothrow()
+        return target
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.extra,
+      fn: async () => {
+        const info = await Worktree.makeWorktreeInfo("space-path")
+        const boot = await Worktree.createFromInfo(info)
+        boot()
+        await ready(info.directory)
+
+        const ok = await fs
+          .stat(info.directory)
+          .then(() => true)
+          .catch(() => false)
+        expect(ok).toBe(true)
+
+        await Worktree.remove({ directory: info.directory })
+      },
+    })
+  })
+
   test("multiple sessions can share one workspace without duplicating workspaces", async () => {
     await using tmp = await fixture()
     await Instance.provide({
@@ -267,6 +403,44 @@ describe("worktree edge cases", () => {
       },
     })
   })
+
+  test("concurrent sessions on same workspace do not duplicate workspaces", async () => {
+    await using tmp = await fixture()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const made = await Session.createWithWorktree({
+          projectID: Instance.project.id,
+          directory: tmp.path,
+          title: "shared-concurrent",
+        })
+        await ready(made.workspace.directory!)
+
+        const created = await Promise.all([
+          Session.createNext({
+            directory: made.workspace.directory!,
+            workspaceID: made.workspace.id,
+            title: "c1",
+          }),
+          Session.createNext({
+            directory: made.workspace.directory!,
+            workspaceID: made.workspace.id,
+            title: "c2",
+          }),
+        ])
+
+        expect((await Session.get(created[0].id)).workspaceID).toBe(made.workspace.id)
+        expect((await Session.get(created[1].id)).workspaceID).toBe(made.workspace.id)
+        expect(Workspace.list(Instance.project).filter((x) => x.type === "worktree")).toHaveLength(1)
+
+        await Session.remove(created[0].id)
+        await Session.remove(created[1].id)
+        await Session.remove(made.session.id)
+      },
+    })
+  })
+
+  test.skip("non-fast-forward push error is documented but requires remote setup", () => {})
 
   test.skip("disk full behavior is documented but not simulated in integration tests", () => {})
 

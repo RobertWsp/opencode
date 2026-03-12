@@ -23,6 +23,7 @@ import { Command } from "../command"
 import { Global } from "../global"
 import { WorkspaceContext } from "../control-plane/workspace-context"
 import { WorkspaceRouterMiddleware } from "../control-plane/workspace-router-middleware"
+import { Workspace } from "../control-plane/workspace"
 import { ProjectRoutes } from "./routes/project"
 import { SessionRoutes } from "./routes/session"
 import { PtyRoutes } from "./routes/pty"
@@ -213,6 +214,7 @@ export namespace Server {
                 directory,
                 init: InstanceBootstrap,
                 async fn() {
+                  Workspace.startSyncing(Instance.project)
                   return next()
                 },
               })
