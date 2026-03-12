@@ -402,16 +402,11 @@ export namespace Worktree {
   }
 
   export async function createFromInfo(info: Info, startCommand?: string, startPoint?: string) {
-    const base = startPoint ?? (await resolveDefaultBranch(Instance.project.worktree).catch(() => undefined))
-    const created = base
-      ? await $`git worktree add --no-checkout -b ${info.branch} ${info.directory} ${base}`
-          .quiet()
-          .nothrow()
-          .cwd(Instance.worktree)
-      : await $`git worktree add --no-checkout -b ${info.branch} ${info.directory}`
-          .quiet()
-          .nothrow()
-          .cwd(Instance.worktree)
+    const base = startPoint ?? (await resolveDefaultBranch(Instance.project.worktree))
+    const created = await $`git worktree add --no-checkout -b ${info.branch} ${info.directory} ${base}`
+      .quiet()
+      .nothrow()
+      .cwd(Instance.worktree)
     if (created.exitCode !== 0) {
       throw new CreateFailedError({ message: errorText(created) || "Failed to create git worktree" })
     }
