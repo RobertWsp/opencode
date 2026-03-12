@@ -90,7 +90,7 @@ export function DialogWorktreeCreate() {
           height={3}
           keyBindings={[{ name: "return", action: "submit" }]}
           ref={(val: TextareaRenderable) => (input = val)}
-          initialValue="dev"
+          initialValue=""
           placeholder="Branch to base worktree on"
           textColor={theme.text}
           focusedTextColor={theme.text}
