@@ -956,6 +956,7 @@ export class Workspace extends HeyApiClient {
       id: string
       directory?: string
       workspace?: string
+      force?: "true" | "false"
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -967,6 +968,7 @@ export class Workspace extends HeyApiClient {
             { in: "path", key: "id" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "force" },
           ],
         },
       ],
@@ -2465,6 +2467,7 @@ export class Auth2 extends HeyApiClient {
     parameters: {
       providerID: string
       directory?: string
+      workspace?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2475,6 +2478,7 @@ export class Auth2 extends HeyApiClient {
           args: [
             { in: "path", key: "providerID" },
             { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
           ],
         },
       ],
@@ -2591,6 +2595,7 @@ export class Accounts extends HeyApiClient {
     parameters: {
       providerID: string
       directory?: string
+      workspace?: string
       apiKey?: string
       label?: string
     },
@@ -2603,6 +2608,7 @@ export class Accounts extends HeyApiClient {
           args: [
             { in: "path", key: "providerID" },
             { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
             { in: "body", key: "apiKey" },
             { in: "body", key: "label" },
           ],
@@ -2632,6 +2638,7 @@ export class Accounts extends HeyApiClient {
     parameters: {
       providerID: string
       directory?: string
+      workspace?: string
       authKey?: string
     },
     options?: Options<never, ThrowOnError>,
@@ -2643,6 +2650,7 @@ export class Accounts extends HeyApiClient {
           args: [
             { in: "path", key: "providerID" },
             { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
             { in: "body", key: "authKey" },
           ],
         },
@@ -2734,10 +2742,21 @@ export class Provider extends HeyApiClient {
   public accounts<ThrowOnError extends boolean = false>(
     parameters?: {
       directory?: string
+      workspace?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
-    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "directory" }] }])
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
     return (options?.client ?? this.client).get<ProviderAccountsResponses, unknown, ThrowOnError>({
       url: "/provider/accounts",
       ...options,

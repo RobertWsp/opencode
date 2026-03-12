@@ -26,7 +26,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
   const [unpushed, setUnpushed] = createSignal(0)
   const [dir, setDir] = createSignal("")
   const [branch, setBranch] = createSignal("")
-  const [base, setBase] = createSignal("dev")
+  const [base, setBase] = createSignal("")
   const [selected, setSelected] = createSignal(0)
   const [err, setErr] = createSignal("")
 
@@ -50,7 +50,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
 
     setDir(ws.directory)
     setBranch(ws.branch ?? "unknown")
-    setBase((ws.extra as { baseBranch?: string })?.baseBranch ?? "dev")
+    setBase((ws.extra as { baseBranch?: string })?.baseBranch ?? "")
 
     const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: ws.directory })
     const dirty = status.stdout
@@ -109,7 +109,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
 
   async function discard() {
     setErr("")
-    await sdk.client.experimental.workspace.remove({ id: props.workspaceID })
+    await sdk.client.experimental.workspace.remove({ id: props.workspaceID, force: "true" })
     toast.show({ message: "Worktree discarded", variant: "success" })
     props.onDone()
   }

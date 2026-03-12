@@ -833,6 +833,35 @@ export type EventCommandExecuted = {
   }
 }
 
+export type EventWorktreeReady = {
+  type: "worktree.ready"
+  properties: {
+    name: string
+    branch: string
+  }
+}
+
+export type EventWorktreeFailed = {
+  type: "worktree.failed"
+  properties: {
+    message: string
+  }
+}
+
+export type EventWorkspaceReady = {
+  type: "workspace.ready"
+  properties: {
+    name: string
+  }
+}
+
+export type EventWorkspaceFailed = {
+  type: "workspace.failed"
+  properties: {
+    message: string
+  }
+}
+
 export type PermissionAction = "allow" | "deny" | "ask"
 
 export type PermissionRule = {
@@ -927,20 +956,6 @@ export type EventVcsBranchUpdated = {
   }
 }
 
-export type EventWorkspaceReady = {
-  type: "workspace.ready"
-  properties: {
-    name: string
-  }
-}
-
-export type EventWorkspaceFailed = {
-  type: "workspace.failed"
-  properties: {
-    message: string
-  }
-}
-
 export type Pty = {
   id: string
   title: string
@@ -980,21 +995,6 @@ export type EventPtyDeleted = {
   }
 }
 
-export type EventWorktreeReady = {
-  type: "worktree.ready"
-  properties: {
-    name: string
-    branch: string
-  }
-}
-
-export type EventWorktreeFailed = {
-  type: "worktree.failed"
-  properties: {
-    message: string
-  }
-}
-
 export type Event =
   | EventInstallationUpdated
   | EventInstallationUpdateAvailable
@@ -1030,410 +1030,24 @@ export type Event =
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
+  | EventWorktreeReady
+  | EventWorktreeFailed
+  | EventWorkspaceReady
+  | EventWorkspaceFailed
   | EventSessionCreated
   | EventSessionUpdated
   | EventSessionDeleted
   | EventSessionDiff
   | EventSessionError
   | EventVcsBranchUpdated
-  | EventWorkspaceReady
-  | EventWorkspaceFailed
   | EventPtyCreated
   | EventPtyUpdated
   | EventPtyExited
   | EventPtyDeleted
-  | EventWorktreeReady
-  | EventWorktreeFailed
 
 export type GlobalEvent = {
   directory: string
   payload: Event
-}
-
-/**
- * Custom keybind configurations
- */
-export type KeybindsConfig = {
-  /**
-   * Leader key for keybind combinations
-   */
-  leader?: string
-  /**
-   * Exit the application
-   */
-  app_exit?: string
-  /**
-   * Open external editor
-   */
-  editor_open?: string
-  /**
-   * List available themes
-   */
-  theme_list?: string
-  /**
-   * Toggle sidebar
-   */
-  sidebar_toggle?: string
-  /**
-   * Toggle session scrollbar
-   */
-  scrollbar_toggle?: string
-  /**
-   * Toggle username visibility
-   */
-  username_toggle?: string
-  /**
-   * View status
-   */
-  status_view?: string
-  /**
-   * Export session to editor
-   */
-  session_export?: string
-  /**
-   * Create a new session
-   */
-  session_new?: string
-  /**
-   * List all sessions
-   */
-  session_list?: string
-  /**
-   * Show session timeline
-   */
-  session_timeline?: string
-  /**
-   * Fork session from message
-   */
-  session_fork?: string
-  /**
-   * Rename session
-   */
-  session_rename?: string
-  /**
-   * Delete session
-   */
-  session_delete?: string
-  /**
-   * Delete stash entry
-   */
-  stash_delete?: string
-  /**
-   * Open provider list from model dialog
-   */
-  model_provider_list?: string
-  /**
-   * Toggle model favorite status
-   */
-  model_favorite_toggle?: string
-  /**
-   * Share current session
-   */
-  session_share?: string
-  /**
-   * Unshare current session
-   */
-  session_unshare?: string
-  /**
-   * Interrupt current session
-   */
-  session_interrupt?: string
-  /**
-   * Compact the session
-   */
-  session_compact?: string
-  /**
-   * Scroll messages up by one page
-   */
-  messages_page_up?: string
-  /**
-   * Scroll messages down by one page
-   */
-  messages_page_down?: string
-  /**
-   * Scroll messages up by one line
-   */
-  messages_line_up?: string
-  /**
-   * Scroll messages down by one line
-   */
-  messages_line_down?: string
-  /**
-   * Scroll messages up by half page
-   */
-  messages_half_page_up?: string
-  /**
-   * Scroll messages down by half page
-   */
-  messages_half_page_down?: string
-  /**
-   * Navigate to first message
-   */
-  messages_first?: string
-  /**
-   * Navigate to last message
-   */
-  messages_last?: string
-  /**
-   * Navigate to next message
-   */
-  messages_next?: string
-  /**
-   * Navigate to previous message
-   */
-  messages_previous?: string
-  /**
-   * Navigate to last user message
-   */
-  messages_last_user?: string
-  /**
-   * Copy message
-   */
-  messages_copy?: string
-  /**
-   * Undo message
-   */
-  messages_undo?: string
-  /**
-   * Redo message
-   */
-  messages_redo?: string
-  /**
-   * Toggle code block concealment in messages
-   */
-  messages_toggle_conceal?: string
-  /**
-   * Toggle tool details visibility
-   */
-  tool_details?: string
-  /**
-   * List available models
-   */
-  model_list?: string
-  /**
-   * Next recently used model
-   */
-  model_cycle_recent?: string
-  /**
-   * Previous recently used model
-   */
-  model_cycle_recent_reverse?: string
-  /**
-   * Next favorite model
-   */
-  model_cycle_favorite?: string
-  /**
-   * Previous favorite model
-   */
-  model_cycle_favorite_reverse?: string
-  /**
-   * List available commands
-   */
-  command_list?: string
-  /**
-   * List agents
-   */
-  agent_list?: string
-  /**
-   * Next agent
-   */
-  agent_cycle?: string
-  /**
-   * Previous agent
-   */
-  agent_cycle_reverse?: string
-  /**
-   * Cycle model variants
-   */
-  variant_cycle?: string
-  /**
-   * Clear input field
-   */
-  input_clear?: string
-  /**
-   * Paste from clipboard
-   */
-  input_paste?: string
-  /**
-   * Paste image from clipboard (useful on WSL where Ctrl+V may be intercepted)
-   */
-  input_paste_image?: string
-  /**
-   * Submit input
-   */
-  input_submit?: string
-  /**
-   * Insert newline in input
-   */
-  input_newline?: string
-  /**
-   * Move cursor left in input
-   */
-  input_move_left?: string
-  /**
-   * Move cursor right in input
-   */
-  input_move_right?: string
-  /**
-   * Move cursor up in input
-   */
-  input_move_up?: string
-  /**
-   * Move cursor down in input
-   */
-  input_move_down?: string
-  /**
-   * Select left in input
-   */
-  input_select_left?: string
-  /**
-   * Select right in input
-   */
-  input_select_right?: string
-  /**
-   * Select up in input
-   */
-  input_select_up?: string
-  /**
-   * Select down in input
-   */
-  input_select_down?: string
-  /**
-   * Move to start of line in input
-   */
-  input_line_home?: string
-  /**
-   * Move to end of line in input
-   */
-  input_line_end?: string
-  /**
-   * Select to start of line in input
-   */
-  input_select_line_home?: string
-  /**
-   * Select to end of line in input
-   */
-  input_select_line_end?: string
-  /**
-   * Move to start of visual line in input
-   */
-  input_visual_line_home?: string
-  /**
-   * Move to end of visual line in input
-   */
-  input_visual_line_end?: string
-  /**
-   * Select to start of visual line in input
-   */
-  input_select_visual_line_home?: string
-  /**
-   * Select to end of visual line in input
-   */
-  input_select_visual_line_end?: string
-  /**
-   * Move to start of buffer in input
-   */
-  input_buffer_home?: string
-  /**
-   * Move to end of buffer in input
-   */
-  input_buffer_end?: string
-  /**
-   * Select to start of buffer in input
-   */
-  input_select_buffer_home?: string
-  /**
-   * Select to end of buffer in input
-   */
-  input_select_buffer_end?: string
-  /**
-   * Delete line in input
-   */
-  input_delete_line?: string
-  /**
-   * Delete to end of line in input
-   */
-  input_delete_to_line_end?: string
-  /**
-   * Delete to start of line in input
-   */
-  input_delete_to_line_start?: string
-  /**
-   * Backspace in input
-   */
-  input_backspace?: string
-  /**
-   * Delete character in input
-   */
-  input_delete?: string
-  /**
-   * Undo in input
-   */
-  input_undo?: string
-  /**
-   * Redo in input
-   */
-  input_redo?: string
-  /**
-   * Move word forward in input
-   */
-  input_word_forward?: string
-  /**
-   * Move word backward in input
-   */
-  input_word_backward?: string
-  /**
-   * Select word forward in input
-   */
-  input_select_word_forward?: string
-  /**
-   * Select word backward in input
-   */
-  input_select_word_backward?: string
-  /**
-   * Delete word forward in input
-   */
-  input_delete_word_forward?: string
-  /**
-   * Delete word backward in input
-   */
-  input_delete_word_backward?: string
-  /**
-   * Previous history item
-   */
-  history_previous?: string
-  /**
-   * Next history item
-   */
-  history_next?: string
-  /**
-   * Next child session
-   */
-  session_child_cycle?: string
-  /**
-   * Previous child session
-   */
-  session_child_cycle_reverse?: string
-  /**
-   * Go to parent session
-   */
-  session_parent?: string
-  /**
-   * Suspend terminal
-   */
-  terminal_suspend?: string
-  /**
-   * Toggle terminal title
-   */
-  terminal_title_toggle?: string
-  /**
-   * Toggle tips on home screen
-   */
-  tips_toggle?: string
-  /**
-   * Toggle thinking blocks visibility
-   */
-  display_thinking?: string
 }
 
 /**
@@ -1941,6 +1555,16 @@ export type Config = {
      */
     mcp_timeout?: number
   }
+  worktree?: {
+    /**
+     * Maximum number of concurrent worktrees per project
+     */
+    maxConcurrent?: number
+    /**
+     * Command to run when starting a new worktree session
+     */
+    startCommand?: string
+  }
 }
 
 export type BadRequestError = {
@@ -2089,10 +1713,12 @@ export type Worktree = {
   name: string
   branch: string
   directory: string
+  baseBranch?: string
 }
 
 export type WorktreeCreateInput = {
   name?: string
+  baseBranch?: string
   /**
    * Additional startup script to run after the project's start command
    */
@@ -2951,6 +2577,7 @@ export type ExperimentalWorkspaceRemoveData = {
   query?: {
     directory?: string
     workspace?: string
+    force?: "true" | "false"
   }
   url: "/experimental/workspace/{id}"
 }
@@ -4454,6 +4081,7 @@ export type ProviderAuthListData = {
   }
   query?: {
     directory?: string
+    workspace?: string
   }
   url: "/provider/auth/list/{providerID}"
 }
@@ -4564,6 +4192,7 @@ export type ProviderAccountsData = {
   path?: never
   query?: {
     directory?: string
+    workspace?: string
   }
   url: "/provider/accounts"
 }
@@ -4610,6 +4239,7 @@ export type ProviderAccountsAddData = {
   }
   query?: {
     directory?: string
+    workspace?: string
   }
   url: "/provider/{providerID}/accounts/add"
 }
@@ -4647,6 +4277,7 @@ export type ProviderAccountsRemoveData = {
   }
   query?: {
     directory?: string
+    workspace?: string
   }
   url: "/provider/{providerID}/accounts/remove"
 }

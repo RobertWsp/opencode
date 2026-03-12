@@ -85,7 +85,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
       if (!ws?.directory || !ws?.branch) return undefined
       const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: ws.directory })
       const changes = status.stdout.toString().trim().split("\n").filter(Boolean).length
-      const base = (ws.extra as { baseBranch?: string })?.baseBranch ?? "dev"
+      const base = (ws.extra as { baseBranch?: string })?.baseBranch ?? ""
       const rev = Bun.spawnSync(["git", "rev-list", `HEAD..${base}`, "--count"], { cwd: ws.directory })
       const behind = parseInt(rev.stdout.toString().trim()) || 0
       return {

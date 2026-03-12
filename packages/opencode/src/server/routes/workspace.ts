@@ -86,9 +86,19 @@ export const WorkspaceRoutes = lazy(() =>
           id: Workspace.Info.shape.id,
         }),
       ),
+      validator(
+        "query",
+        z.object({
+          force: z
+            .enum(["true", "false"])
+            .optional()
+            .transform((v) => v === "true"),
+        }),
+      ),
       async (c) => {
         const { id } = c.req.valid("param")
-        return c.json(await Workspace.remove(id))
+        const { force } = c.req.valid("query")
+        return c.json(await Workspace.remove(id, { force }))
       },
     ),
 )
