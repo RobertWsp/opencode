@@ -239,20 +239,44 @@ describe("session + workspace worktree integration", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
+        // Start listening BEFORE creating, so we don't miss events
+        const aReady = new Promise<string>((resolve) => {
+          const on = (event: { directory?: string; payload?: { type?: string } }) => {
+            if (event.payload?.type !== "worktree.ready") return
+            if (!event.directory) return
+            GlobalBus.off("event", on)
+            resolve(event.directory)
+          }
+          GlobalBus.on("event", on)
+        })
+
         const a = await Workspace.create({
           type: "worktree",
           projectID: Instance.project.id,
           branch: null,
           extra: null,
         })
+
+        const aDir = await aReady
+
+        const bReady = new Promise<string>((resolve) => {
+          const on = (event: { directory?: string; payload?: { type?: string } }) => {
+            if (event.payload?.type !== "worktree.ready") return
+            if (!event.directory || event.directory === aDir) return
+            GlobalBus.off("event", on)
+            resolve(event.directory)
+          }
+          GlobalBus.on("event", on)
+        })
+
         const b = await Workspace.create({
           type: "worktree",
           projectID: Instance.project.id,
           branch: null,
           extra: null,
         })
-        await ready(a.directory!)
-        await ready(b.directory!)
+
+        await bReady
 
         await expect(
           Workspace.create({
