@@ -8,6 +8,7 @@ import { useKeybind } from "../context/keybind"
 import { useTheme } from "../context/theme"
 import { useSDK } from "../context/sdk"
 import { DialogSessionRename } from "./dialog-session-rename"
+import { DialogWorktreeEnd } from "./dialog-worktree-end"
 import { useKV } from "../context/kv"
 import { createDebouncedSignal } from "../util/signal"
 import { Spinner } from "./spinner"
@@ -49,7 +50,11 @@ export function DialogSessionList() {
         const status = sync.data.session_status?.[x.id]
         const isWorking = status?.type === "busy"
         return {
-          title: isDeleting ? `Press ${keybind.print("session_delete")} again to confirm` : x.title,
+          title: isDeleting
+            ? `Press ${keybind.print("session_delete")} again to confirm`
+            : x.workspaceID
+              ? `${x.title} [wt]`
+              : x.title,
           bg: isDeleting ? theme.error : undefined,
           value: x.id,
           category,
@@ -86,6 +91,21 @@ export function DialogSessionList() {
           title: "delete",
           onTrigger: async (option) => {
             if (toDelete() === option.value) {
+              const session = sync.data.session.find((s) => s.id === option.value)
+              if (session?.workspaceID) {
+                dialog.replace(() => (
+                  <DialogWorktreeEnd
+                    sessionID={option.value}
+                    workspaceID={session.workspaceID!}
+                    onDone={() => {
+                      sdk.client.session.delete({ sessionID: option.value })
+                      dialog.clear()
+                    }}
+                  />
+                ))
+                setToDelete(undefined)
+                return
+              }
               sdk.client.session.delete({
                 sessionID: option.value,
               })

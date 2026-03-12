@@ -8,25 +8,46 @@ const Config = WorkspaceInfo.extend({
   directory: WorkspaceInfo.shape.directory.unwrap(),
 })
 
+const Extra = z
+  .object({
+    baseBranch: z.string().optional(),
+  })
+  .passthrough()
+
 type Config = z.infer<typeof Config>
 
 export const WorktreeAdaptor: Adaptor = {
   async configure(info) {
-    const worktree = await Worktree.makeWorktreeInfo(info.name ?? undefined)
+    const extra = Extra.safeParse(info.extra)
+    const base = extra.success ? extra.data.baseBranch : undefined
+    const worktree = await Worktree.makeWorktreeInfo(info.name ?? undefined, base)
     return {
       ...info,
       name: worktree.name,
       branch: worktree.branch,
       directory: worktree.directory,
+      extra: base
+        ? {
+            ...(extra.success ? extra.data : {}),
+            baseBranch: base,
+          }
+        : info.extra,
     }
   },
   async create(info) {
     const config = Config.parse(info)
-    const bootstrap = await Worktree.createFromInfo({
-      name: config.name,
-      directory: config.directory,
-      branch: config.branch,
-    })
+    const extra = Extra.safeParse(config.extra)
+    const startPoint = extra.success ? extra.data.baseBranch : undefined
+    const bootstrap = await Worktree.createFromInfo(
+      {
+        name: config.name,
+        directory: config.directory,
+        branch: config.branch,
+        baseBranch: startPoint,
+      },
+      undefined,
+      startPoint,
+    )
     return bootstrap()
   },
   async remove(info) {

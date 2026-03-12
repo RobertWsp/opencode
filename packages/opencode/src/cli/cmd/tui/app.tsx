@@ -21,6 +21,8 @@ import { DialogHelp } from "./ui/dialog-help"
 import { CommandProvider, useCommandDialog } from "@tui/component/dialog-command"
 import { DialogAgent } from "@tui/component/dialog-agent"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
+import { DialogWorktreeCreate } from "@tui/component/dialog-worktree-create"
+import { DialogWorktreeEnd } from "@tui/component/dialog-worktree-end"
 import { KeybindProvider } from "@tui/context/keybind"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
 import { Home } from "@tui/routes/home"
@@ -258,10 +260,6 @@ function App() {
   }
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
 
-  createEffect(() => {
-    console.log(JSON.stringify(route.data))
-  })
-
   // Update terminal window title based on current route and session
   createEffect(() => {
     if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE) return
@@ -393,6 +391,46 @@ function App() {
           initialPrompt: currentPrompt,
         })
         dialog.clear()
+      },
+    },
+    {
+      title: "Worktree toggle",
+      value: "worktree.toggle",
+      keybind: "worktree_toggle",
+      category: "Session",
+      slash: {
+        name: "worktree",
+        aliases: ["wt"],
+      },
+      onSelect: () => {
+        const session = route.data.type === "session" ? sync.session.get(route.data.sessionID) : undefined
+        if (session?.workspaceID) {
+          dialog.replace(() => (
+            <DialogWorktreeEnd
+              sessionID={session.id}
+              workspaceID={session.workspaceID!}
+              onDone={() => dialog.clear()}
+            />
+          ))
+        } else {
+          dialog.replace(() => <DialogWorktreeCreate />)
+        }
+      },
+    },
+    {
+      title: "Worktree actions",
+      value: "worktree.actions",
+      keybind: "worktree_actions",
+      category: "Session",
+      onSelect: () => {
+        const session = route.data.type === "session" ? sync.session.get(route.data.sessionID) : undefined
+        if (!session?.workspaceID) {
+          toast.show({ message: "No worktree for this session", variant: "info" })
+          return
+        }
+        dialog.replace(() => (
+          <DialogWorktreeEnd sessionID={session.id} workspaceID={session.workspaceID!} onDone={() => dialog.clear()} />
+        ))
       },
     },
     {

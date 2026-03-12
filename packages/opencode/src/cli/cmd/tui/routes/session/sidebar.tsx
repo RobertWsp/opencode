@@ -1,5 +1,5 @@
 import { useSync } from "@tui/context/sync"
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createMemo, createResource, For, Show, Switch, Match } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
 import { Locale } from "@/util/locale"
@@ -10,10 +10,12 @@ import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
+import { useSDK } from "../../context/sdk"
 import { TodoItem } from "../../component/todo-item"
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
+  const sdk = useSDK()
   const { theme } = useTheme()
   const session = createMemo(() => sync.session.get(props.sessionID)!)
   const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
@@ -42,11 +44,9 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   )
 
   const accountProviders = createMemo(() => Object.values(sync.data.accounts))
-  const totalAccountCount = createMemo(() =>
-    accountProviders().reduce((sum, p) => sum + p.accounts.length, 0)
-  )
+  const totalAccountCount = createMemo(() => accountProviders().reduce((sum, p) => sum + p.accounts.length, 0))
   const activeAccountCount = createMemo(() =>
-    accountProviders().reduce((sum, p) => sum + p.accounts.filter((a) => a.status === "active").length, 0)
+    accountProviders().reduce((sum, p) => sum + p.accounts.filter((a) => a.status === "active").length, 0),
   )
 
   const cost = createMemo(() => {
@@ -76,6 +76,27 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
   )
   const gettingStartedDismissed = createMemo(() => kv.get("dismissed_getting_started", false))
+
+  const [worktree] = createResource(
+    () => session()?.workspaceID,
+    async (id) => {
+      const res = await sdk.client.experimental.workspace.list()
+      const ws = res.data?.find((w) => w.id === id)
+      if (!ws?.directory || !ws?.branch) return undefined
+      const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: ws.directory })
+      const changes = status.stdout.toString().trim().split("\n").filter(Boolean).length
+      const base = (ws.extra as { baseBranch?: string })?.baseBranch ?? "dev"
+      const rev = Bun.spawnSync(["git", "rev-list", `HEAD..${base}`, "--count"], { cwd: ws.directory })
+      const behind = parseInt(rev.stdout.toString().trim()) || 0
+      return {
+        branch: ws.branch,
+        dir: ws.directory.split("/").slice(-2).join("/"),
+        changes,
+        behind,
+        base,
+      }
+    },
+  )
 
   return (
     <Show when={session()}>
@@ -115,6 +136,23 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
               <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
+            <Show when={worktree()}>
+              <box>
+                <text fg={theme.text}>
+                  <b>Worktree</b>
+                </text>
+                <text fg={theme.textMuted}>
+                  <span style={{ fg: theme.text }}>{worktree()!.branch}</span>
+                </text>
+                <text fg={theme.textMuted}>
+                  <span style={{ fg: worktree()!.changes === 0 ? theme.success : theme.warning }}>●</span>{" "}
+                  {worktree()!.changes} changed file{worktree()!.changes !== 1 ? "s" : ""}
+                </text>
+                <text fg={theme.textMuted}>
+                  {worktree()!.behind > 0 ? `↓${worktree()!.behind} behind ${worktree()!.base}` : "✓ up to date"}
+                </text>
+              </box>
+            </Show>
             <Show when={mcpEntries().length > 0}>
               <box>
                 <box

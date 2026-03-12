@@ -1,4 +1,5 @@
 import z from "zod"
+import * as fs from "fs/promises"
 import { Identifier } from "@/id/id"
 import { fn } from "@/util/fn"
 import { Database, eq } from "@/storage/db"
@@ -6,12 +7,26 @@ import { Project } from "@/project/project"
 import { BusEvent } from "@/bus/bus-event"
 import { GlobalBus } from "@/bus/global"
 import { Log } from "@/util/log"
+import { Worktree } from "@/worktree"
+import { Config } from "@/config/config"
 import { WorkspaceTable } from "./workspace.sql"
 import { getAdaptor } from "./adaptors"
 import { WorkspaceInfo } from "./types"
 import { parseSSE } from "./sse"
 
 export namespace Workspace {
+  export class WorkspaceDirtyError extends Error {
+    readonly uncommitted: number
+    readonly unpushed: number
+
+    constructor(input: { uncommitted: number; unpushed: number }) {
+      super("WorkspaceDirtyError")
+      this.name = "WorkspaceDirtyError"
+      this.uncommitted = input.uncommitted
+      this.unpushed = input.unpushed
+    }
+  }
+
   export const Event = {
     Ready: BusEvent.define(
       "workspace.ready",
@@ -54,6 +69,18 @@ export namespace Workspace {
 
   export const create = fn(CreateInput, async (input) => {
     const id = Identifier.ascending("workspace", input.id)
+
+    if (input.type === "worktree") {
+      const cfg = await Config.get()
+      const max = cfg.worktree?.maxConcurrent ?? 8
+      const existing = list({ id: input.projectID } as Project.Info).filter((x) => x.type === "worktree")
+      if (existing.length >= max) {
+        throw new Error(
+          `Maximum concurrent worktrees reached (${existing.length}/${max}). Archive a worktree session to free a slot.`,
+        )
+      }
+    }
+
     const adaptor = await getAdaptor(input.type)
 
     const config = await adaptor.configure({ ...input, id, name: null, directory: null })
@@ -99,16 +126,44 @@ export namespace Workspace {
     return fromRow(row)
   })
 
-  export const remove = fn(Identifier.schema("workspace"), async (id) => {
+  export async function remove(id: string, opts?: { force?: boolean }) {
+    const parsed = Identifier.schema("workspace").parse(id)
     const row = Database.use((db) => db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, id)).get())
     if (row) {
       const info = fromRow(row)
+      if (info.type === "worktree" && info.directory) {
+        const dirty = await Worktree.hasUnpushedWork(info.directory)
+        if (dirty.dirty && opts?.force !== true) {
+          throw new WorkspaceDirtyError({
+            uncommitted: dirty.uncommitted,
+            unpushed: dirty.unpushed,
+          })
+        }
+      }
       const adaptor = await getAdaptor(row.type)
-      adaptor.remove(info)
-      Database.use((db) => db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, id)).run())
+      await adaptor.remove(info)
+      Database.use((db) => db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, parsed)).run())
       return info
     }
-  })
+  }
+
+  export async function pruneOrphans(project: Project.Info) {
+    const spaces = list(project).filter((x) => x.type === "worktree")
+    await Promise.all(
+      spaces.map(async (space) => {
+        if (!space.directory) {
+          Database.use((db) => db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, space.id)).run())
+          return
+        }
+        const found = await fs
+          .access(space.directory)
+          .then(() => true)
+          .catch(() => false)
+        if (found) return
+        Database.use((db) => db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, space.id)).run())
+      }),
+    )
+  }
   const log = Log.create({ service: "workspace-sync" })
 
   async function workspaceEventLoop(space: Info, stop: AbortSignal) {
@@ -131,6 +186,12 @@ export namespace Workspace {
   }
 
   export function startSyncing(project: Project.Info) {
+    void pruneOrphans(project).catch((error) => {
+      log.warn("workspace orphan prune failed", {
+        projectID: project.id,
+        error,
+      })
+    })
     const stop = new AbortController()
     const spaces = list(project).filter((space) => space.type !== "worktree")
 

@@ -22,6 +22,7 @@ import { SessionPrompt } from "./prompt"
 import { fn } from "@/util/fn"
 import { Command } from "../command"
 import { Snapshot } from "@/snapshot"
+import { Workspace } from "@/control-plane/workspace"
 import { WorkspaceContext } from "../control-plane/workspace-context"
 
 import type { Provider } from "@/provider/provider"
@@ -231,6 +232,33 @@ export namespace Session {
     },
   )
 
+  const CreateWithWorktreeInput = z.object({
+    projectID: z.string(),
+    directory: z.string(),
+    title: z.string().optional(),
+  })
+
+  export const createWithWorktree = fn(CreateWithWorktreeInput, async (input) => {
+    return Instance.provide({
+      directory: input.directory,
+      fn: async () => {
+        const workspace = await Workspace.create({
+          type: "worktree",
+          projectID: input.projectID,
+          branch: null,
+          extra: null,
+        })
+        if (!workspace.directory) throw new Error("workspace directory not set")
+        const session = await createNext({
+          directory: workspace.directory,
+          workspaceID: workspace.id,
+          title: input.title,
+        })
+        return { session, workspace }
+      },
+    })
+  })
+
   export const fork = fn(
     z.object({
       sessionID: Identifier.schema("session"),
@@ -241,7 +269,8 @@ export namespace Session {
       if (!original) throw new Error("session not found")
       const title = getForkedTitle(original.title)
       const session = await createNext({
-        directory: Instance.directory,
+        directory: original.workspaceID ? original.directory : Instance.directory,
+        workspaceID: original.workspaceID,
         title,
       })
       const msgs = await messages({ sessionID: input.sessionID })
@@ -293,6 +322,7 @@ export namespace Session {
     title?: string
     parentID?: string
     directory: string
+    workspaceID?: string
     permission?: PermissionNext.Ruleset
   }) {
     const result: Info = {
@@ -301,7 +331,7 @@ export namespace Session {
       version: Installation.VERSION,
       projectID: Instance.project.id,
       directory: input.directory,
-      workspaceID: WorkspaceContext.workspaceID,
+      workspaceID: input.workspaceID ?? WorkspaceContext.workspaceID,
       parentID: input.parentID,
       title: input.title ?? createDefaultTitle(!!input.parentID),
       permission: input.permission,
@@ -671,6 +701,17 @@ export namespace Session {
           }),
         )
       })
+      const wid = session.workspaceID
+      if (wid) {
+        const count = Database.use(
+          (db) =>
+            db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.workspace_id, wid)).all()
+              .length,
+        )
+        if (count === 0) {
+          await Workspace.remove(wid)
+        }
+      }
     } catch (e) {
       log.error(e)
     }

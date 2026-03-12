@@ -776,6 +776,8 @@ export namespace Config {
       session_unshare: z.string().optional().default("none").describe("Unshare current session"),
       session_interrupt: z.string().optional().default("escape").describe("Interrupt current session"),
       session_compact: z.string().optional().default("<leader>c").describe("Compact the session"),
+      worktree_toggle: z.string().optional().default("<leader>w").describe("Toggle worktree for current session"),
+      worktree_actions: z.string().optional().default("<leader>W").describe("Worktree session-end actions"),
       messages_page_up: z.string().optional().default("pageup,ctrl+alt+b").describe("Scroll messages up by one page"),
       messages_page_down: z
         .string()
@@ -982,7 +984,7 @@ export namespace Config {
               z.object({
                 key: z.string(),
                 label: z.string().optional(),
-              })
+              }),
             )
             .optional()
             .describe("Multiple API keys for account rotation"),
@@ -1180,6 +1182,17 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+        })
+        .optional(),
+      worktree: z
+        .object({
+          maxConcurrent: z
+            .number()
+            .int()
+            .positive()
+            .default(8)
+            .describe("Maximum number of concurrent worktrees per project"),
+          startCommand: z.string().optional().describe("Command to run when starting a new worktree session"),
         })
         .optional(),
     })

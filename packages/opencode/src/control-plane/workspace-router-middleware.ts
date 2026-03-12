@@ -37,8 +37,15 @@ async function routeRequest(req: Request) {
 }
 
 export const WorkspaceRouterMiddleware: MiddlewareHandler = async (c, next) => {
-  // Only available in development for now
-  if (!Installation.isLocal()) {
+  const workspaceID = WorkspaceContext.workspaceID
+  if (!workspaceID) return next()
+
+  const workspace = await Workspace.get(workspaceID)
+  if (!workspace) return next()
+
+  // Allow worktree type workspaces to always route
+  // For other types, only route in development (local installations)
+  if (workspace.type !== "worktree" && !Installation.isLocal()) {
     return next()
   }
 

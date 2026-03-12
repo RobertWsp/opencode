@@ -38,6 +38,7 @@ export namespace Worktree {
       name: z.string(),
       branch: z.string(),
       directory: z.string(),
+      baseBranch: z.string().optional(),
     })
     .meta({
       ref: "Worktree",
@@ -48,6 +49,7 @@ export namespace Worktree {
   export const CreateInput = z
     .object({
       name: z.string().optional(),
+      baseBranch: z.string().optional(),
       startCommand: z
         .string()
         .optional()
@@ -265,9 +267,57 @@ export namespace Worktree {
     return process.platform === "win32" ? normalized.toLowerCase() : normalized
   }
 
+  export async function resolveDefaultBranch(cwd: string, remote?: string): Promise<string> {
+    const picked = remote
+      ? remote
+      : await $`git remote`
+          .quiet()
+          .nothrow()
+          .cwd(cwd)
+          .then((result) => {
+            if (result.exitCode !== 0) return ""
+            const remotes = outputText(result.stdout)
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+            return remotes.includes("origin")
+              ? "origin"
+              : remotes.length === 1
+                ? remotes[0]
+                : remotes.includes("upstream")
+                  ? "upstream"
+                  : ""
+          })
+
+    const fromRemote = picked
+      ? await $`git symbolic-ref refs/remotes/${picked}/HEAD`
+          .quiet()
+          .nothrow()
+          .cwd(cwd)
+          .then((result) => {
+            if (result.exitCode !== 0) return ""
+            const ref = outputText(result.stdout)
+            const target = ref ? ref.replace(/^refs\/remotes\//, "") : ""
+            return target.startsWith(`${picked}/`) ? target.slice(`${picked}/`.length) : ""
+          })
+      : ""
+
+    if (fromRemote) return fromRemote
+
+    const init = await $`git config --get init.defaultBranch`
+      .quiet()
+      .nothrow()
+      .cwd(cwd)
+      .then((result) => (result.exitCode === 0 ? outputText(result.stdout) : ""))
+
+    if (init) return init
+
+    throw new Error("Cannot detect default branch. Run: git remote set-head origin --auto")
+  }
+
   async function candidate(root: string, base?: string) {
     for (const attempt of Array.from({ length: 26 }, (_, i) => i)) {
-      const name = base ? (attempt === 0 ? base : `${base}-${randomName()}`) : randomName()
+      const name = base ? (attempt === 0 ? base : `${base}-${attempt + 1}`) : randomName()
       const branch = `opencode/${name}`
       const directory = path.join(root, name)
 
@@ -331,7 +381,7 @@ export namespace Worktree {
     }, 0)
   }
 
-  export async function makeWorktreeInfo(name?: string): Promise<Info> {
+  export async function makeWorktreeInfo(name?: string, baseBranch?: string): Promise<Info> {
     if (Instance.project.vcs !== "git") {
       throw new NotGitError({ message: "Worktrees are only supported for git projects" })
     }
@@ -340,14 +390,26 @@ export namespace Worktree {
     await fs.mkdir(root, { recursive: true })
 
     const base = name ? slug(name) : ""
-    return candidate(root, base || undefined)
+    return candidate(root, base || undefined).then((info) =>
+      baseBranch
+        ? Info.parse({
+            ...info,
+            baseBranch,
+          })
+        : info,
+    )
   }
 
-  export async function createFromInfo(info: Info, startCommand?: string) {
-    const created = await $`git worktree add --no-checkout -b ${info.branch} ${info.directory}`
-      .quiet()
-      .nothrow()
-      .cwd(Instance.worktree)
+  export async function createFromInfo(info: Info, startCommand?: string, startPoint?: string) {
+    const created = startPoint
+      ? await $`git worktree add --no-checkout -b ${info.branch} ${info.directory} ${startPoint}`
+          .quiet()
+          .nothrow()
+          .cwd(Instance.worktree)
+      : await $`git worktree add --no-checkout -b ${info.branch} ${info.directory}`
+          .quiet()
+          .nothrow()
+          .cwd(Instance.worktree)
     if (created.exitCode !== 0) {
       throw new CreateFailedError({ message: errorText(created) || "Failed to create git worktree" })
     }
@@ -418,8 +480,8 @@ export namespace Worktree {
   }
 
   export const create = fn(CreateInput.optional(), async (input) => {
-    const info = await makeWorktreeInfo(input?.name)
-    const bootstrap = await createFromInfo(info, input?.startCommand)
+    const info = await makeWorktreeInfo(input?.name, input?.baseBranch)
+    const bootstrap = await createFromInfo(info, input?.startCommand, input?.baseBranch)
     // This is needed due to how worktrees currently work in the
     // desktop app
     setTimeout(() => {
@@ -427,6 +489,39 @@ export namespace Worktree {
     }, 0)
     return info
   })
+
+  export async function hasUnpushedWork(directory: string) {
+    if (Instance.project.vcs !== "git") {
+      throw new NotGitError({ message: "Worktrees are only supported for git projects" })
+    }
+
+    const dir = await canonical(directory)
+    const status = await $`git status --porcelain`.quiet().nothrow().cwd(dir)
+    if (status.exitCode !== 0) {
+      throw new RemoveFailedError({ message: errorText(status) || "Failed to read git status" })
+    }
+
+    const uncommitted = outputText(status.stdout)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean).length
+
+    const rev = await $`git log --oneline --not --remotes`.quiet().nothrow().cwd(dir)
+    if (rev.exitCode !== 0) {
+      throw new RemoveFailedError({ message: errorText(rev) || "Failed to read git log" })
+    }
+
+    const unpushed = outputText(rev.stdout)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean).length
+
+    return {
+      dirty: uncommitted > 0 || unpushed > 0,
+      uncommitted,
+      unpushed,
+    }
+  }
 
   export const remove = fn(RemoveInput, async (input) => {
     if (Instance.project.vcs !== "git") {
@@ -594,12 +689,12 @@ export namespace Worktree {
     const remoteTarget = remoteRef ? remoteRef.replace(/^refs\/remotes\//, "") : ""
     const remoteBranch = remote && remoteTarget.startsWith(`${remote}/`) ? remoteTarget.slice(`${remote}/`.length) : ""
 
-    const mainCheck = await $`git show-ref --verify --quiet refs/heads/main`.quiet().nothrow().cwd(Instance.worktree)
-    const masterCheck = await $`git show-ref --verify --quiet refs/heads/master`
-      .quiet()
-      .nothrow()
-      .cwd(Instance.worktree)
-    const localBranch = mainCheck.exitCode === 0 ? "main" : masterCheck.exitCode === 0 ? "master" : ""
+    const localBranch = remoteBranch
+      ? ""
+      : await resolveDefaultBranch(Instance.project.worktree, remote || undefined).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          throw new ResetFailedError({ message })
+        })
 
     const target = remoteBranch ? `${remote}/${remoteBranch}` : localBranch
     if (!target) {
