@@ -1,6 +1,6 @@
 import { TextAttributes } from "@opentui/core"
 import { useKeyboard } from "@opentui/solid"
-import { createSignal, onMount, Show, Switch, Match } from "solid-js"
+import { createMemo, createSignal, onMount, Show, Switch, Match } from "solid-js"
 import { useDialog } from "@tui/ui/dialog"
 import { useToast } from "../ui/toast"
 import { useSDK } from "../context/sdk"
@@ -29,6 +29,7 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
   const [base, setBase] = createSignal("")
   const [selected, setSelected] = createSignal(0)
   const [err, setErr] = createSignal("")
+  const [remote, setRemote] = createSignal(true)
 
   const options = [
     { title: "Review Changes", value: "review" },
@@ -37,6 +38,8 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     { title: "Keep Worktree", value: "keep" },
     { title: "Discard All", value: "discard" },
   ] as const
+
+  const opts = createMemo(() => options.filter((o) => remote() || (o.value !== "pr" && o.value !== "push")))
 
   onMount(async () => {
     dialog.setSize("large")
@@ -51,6 +54,9 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     setDir(ws.directory)
     setBranch(ws.branch ?? "unknown")
     setBase((ws.extra as { baseBranch?: string })?.baseBranch ?? "")
+
+    const remotes = Bun.spawnSync(["git", "remote"], { cwd: ws.directory })
+    setRemote(remotes.stdout.toString().trim().length > 0)
 
     const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: ws.directory })
     const dirty = status.stdout
@@ -89,6 +95,17 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
   async function push(mode: "pr" | "only") {
     setPhase({ type: "pushing", target: mode })
     setErr("")
+
+    if (changes() > 0) {
+      Bun.spawnSync(["git", "add", "-A"], { cwd: dir() })
+      const commit = Bun.spawnSync(["git", "commit", "-m", "chore(worktree): auto-commit before push"], { cwd: dir() })
+      if (commit.exitCode !== 0) {
+        setErr(commit.stderr.toString() || "Auto-commit failed")
+        setPhase({ type: "menu" })
+        return
+      }
+    }
+
     const result = Bun.spawnSync(["git", "push", "-u", "origin", branch()], { cwd: dir() })
     const out = result.stdout.toString() + result.stderr.toString()
     if (result.exitCode !== 0) {
@@ -136,16 +153,16 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
     if (p.type !== "menu") return
 
     if (evt.name === "up" || (evt.ctrl && evt.name === "p")) {
-      setSelected((s) => (s > 0 ? s - 1 : options.length - 1))
+      setSelected((s) => (s > 0 ? s - 1 : opts().length - 1))
       return
     }
     if (evt.name === "down" || (evt.ctrl && evt.name === "n")) {
-      setSelected((s) => (s < options.length - 1 ? s + 1 : 0))
+      setSelected((s) => (s < opts().length - 1 ? s + 1 : 0))
       return
     }
 
     if (evt.name === "return") {
-      const opt = options[selected()]
+      const opt = opts()[selected()]
       if (opt.value === "review") return review()
       if (opt.value === "pr") return void push("pr")
       if (opt.value === "push") return void push("only")
@@ -189,9 +206,13 @@ export function DialogWorktreeEnd(props: { sessionID: string; workspaceID: strin
             </text>
           </box>
 
+          <Show when={!remote()}>
+            <text fg={theme.warning}>No remote configured. You can only Keep or Discard.</text>
+          </Show>
+
           <Show when={phase().type !== "pushing"} fallback={<text fg={theme.textMuted}>Pushing...</text>}>
             <box gap={0}>
-              {options.map((opt, i) => (
+              {opts().map((opt, i) => (
                 <box
                   flexDirection="row"
                   onMouseUp={() => {

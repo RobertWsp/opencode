@@ -85,8 +85,19 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
       if (!ws?.directory || !ws?.branch) return undefined
       const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: ws.directory })
       const changes = status.stdout.toString().trim().split("\n").filter(Boolean).length
-      const base = (ws.extra as { baseBranch?: string })?.baseBranch ?? ""
-      const rev = Bun.spawnSync(["git", "rev-list", `HEAD..${base}`, "--count"], { cwd: ws.directory })
+      const gitCommon = Bun.spawnSync(["git", "rev-parse", "--git-common-dir"], { cwd: ws.directory })
+        .stdout.toString()
+        .trim()
+      const root = gitCommon.replace(/\/.git(\/worktrees\/[^/]+)?$/, "") || ws.directory
+      const base =
+        (ws.extra as { baseBranch?: string })?.baseBranch ??
+        (Bun.spawnSync(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"], { cwd: ws.directory })
+          .stdout.toString()
+          .trim()
+          .replace("origin/", "") ||
+          Bun.spawnSync(["git", "config", "init.defaultBranch"], { cwd: ws.directory }).stdout.toString().trim() ||
+          "dev")
+      const rev = Bun.spawnSync(["git", "rev-list", `HEAD..${base}`, "--count"], { cwd: root })
       const behind = parseInt(rev.stdout.toString().trim()) || 0
       return {
         branch: ws.branch,

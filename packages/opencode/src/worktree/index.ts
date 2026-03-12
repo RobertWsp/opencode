@@ -11,6 +11,7 @@ import { Database, eq } from "../storage/db"
 import { ProjectTable } from "../project/project.sql"
 import { fn } from "../util/fn"
 import { Log } from "../util/log"
+import { Lock } from "../util/lock"
 import { BusEvent } from "@/bus/bus-event"
 import { GlobalBus } from "@/bus/global"
 
@@ -703,6 +704,7 @@ export namespace Worktree {
     }
 
     if (remoteBranch) {
+      using _ = await Lock.write("git:" + Instance.project.worktree)
       const fetch = await $`git fetch ${remote} ${remoteBranch}`.quiet().nothrow().cwd(Instance.worktree)
       if (fetch.exitCode !== 0) {
         throw new ResetFailedError({ message: errorText(fetch) || `Failed to fetch ${target}` })

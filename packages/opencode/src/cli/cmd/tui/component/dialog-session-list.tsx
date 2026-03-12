@@ -31,6 +31,15 @@ export function DialogSessionList() {
     return result.data ?? []
   })
 
+  const [workspaces] = createResource(async () => {
+    const res = await sdk.client.experimental.workspace.list()
+    const map = new Map<string, string>()
+    for (const w of res.data ?? []) {
+      if (w.branch) map.set(w.id, w.branch)
+    }
+    return map
+  })
+
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
 
   const sessions = createMemo(() => searchResults() ?? sync.data.session)
@@ -55,6 +64,7 @@ export function DialogSessionList() {
             : x.workspaceID
               ? `${x.title} [wt]`
               : x.title,
+          description: x.workspaceID ? workspaces()?.get(x.workspaceID) : undefined,
           bg: isDeleting ? theme.error : undefined,
           value: x.id,
           category,
