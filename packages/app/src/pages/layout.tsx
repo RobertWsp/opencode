@@ -2059,6 +2059,41 @@ export default function Layout(props: ParentProps) {
     )
   }
 
+  const projects = () => layout.projects.list()
+  const projectOverlay = () => <ProjectDragOverlay projects={projects} activeProject={() => store.activeProject} />
+  const sidebarContent = (mobile?: boolean) => (
+    <SidebarContent
+      mobile={mobile}
+      opened={() => layout.sidebar.opened()}
+      aimMove={aim.move}
+      projects={projects}
+      renderProject={(project) => (
+        <SortableProject ctx={projectSidebarCtx} project={project} sortNow={sortNow} mobile={mobile} />
+      )}
+      handleDragStart={handleDragStart}
+      handleDragEnd={handleDragEnd}
+      handleDragOver={handleDragOver}
+      openProjectLabel={language.t("command.project.open")}
+      openProjectKeybind={() => command.keybind("project.open")}
+      onOpenProject={chooseProject}
+      renderProjectOverlay={projectOverlay}
+      settingsLabel={() => language.t("sidebar.settings")}
+      settingsKeybind={() => command.keybind("settings.open")}
+      onOpenSettings={openSettings}
+      helpLabel={() => language.t("sidebar.help")}
+      onOpenHelp={() => platform.openLink("https://opencode.ai/desktop-feedback")}
+      renderPanel={() =>
+        mobile ? (
+          <SidebarPanel project={currentProject()} mobile />
+        ) : (
+          <Show when={currentProject()}>
+            <SidebarPanel project={currentProject()} merged />
+          </Show>
+        )
+      }
+    />
+  )
+
   return (
     <div class="relative bg-background-base flex-1 min-h-0 flex flex-col select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text">
       <Titlebar />
@@ -2117,8 +2152,46 @@ export default function Layout(props: ParentProps) {
                 <Show when={currentProject()} keyed>
                   {(project) => <SidebarPanel project={project} />}
                 </Show>
-              )}
-            />
+              </main>
+            </div>
+
+            <div
+              classList={{
+                "hidden xl:flex absolute inset-y-0 left-16 z-30": true,
+                "opacity-100 translate-x-0 pointer-events-auto": peeked() && !layout.sidebar.opened(),
+                "opacity-0 -translate-x-2 pointer-events-none": !peeked() || layout.sidebar.opened(),
+                "transition-[opacity,transform] motion-reduce:transition-none": true,
+                "duration-180 ease-out": peeked() && !layout.sidebar.opened(),
+                "duration-120 ease-in": !peeked() || layout.sidebar.opened(),
+              }}
+              onMouseMove={disarm}
+              onMouseEnter={() => {
+                disarm()
+                aim.reset()
+              }}
+              onPointerDown={disarm}
+              onMouseLeave={() => {
+                arm()
+              }}
+            >
+              <Show when={peek()}>
+                <SidebarPanel project={peek()} merged={false} />
+              </Show>
+            </div>
+
+            <div
+              classList={{
+                "hidden xl:block pointer-events-none absolute inset-y-0 right-0 z-25 overflow-hidden": true,
+                "opacity-100 translate-x-0": peeked() && !layout.sidebar.opened(),
+                "opacity-0 -translate-x-2": !peeked() || layout.sidebar.opened(),
+                "transition-[opacity,transform] motion-reduce:transition-none": true,
+                "duration-180 ease-out": peeked() && !layout.sidebar.opened(),
+                "duration-120 ease-in": !peeked() || layout.sidebar.opened(),
+              }}
+              style={{ left: `calc(4rem + ${Math.max(Math.max(layout.sidebar.width(), 244) - 64, 0)}px)` }}
+            >
+              <div class="h-full w-px" style={{ "box-shadow": "var(--shadow-sidebar-overlay)" }} />
+            </div>
           </div>
           <Show when={!layout.sidebar.opened() ? hoverProjectData()?.worktree : undefined} keyed>
             <div class="absolute inset-y-0 left-16 z-50 flex" onMouseEnter={aim.reset}>
