@@ -226,7 +226,7 @@ export const SessionItem = (props: SessionItemProps): JSX.Element => {
   const hoverMessages = createMemo(() =>
     sessionStore.message[props.session.id]?.filter((message): message is UserMessage => message.role === "user"),
   )
-  const hoverReady = createMemo(() => sessionStore.message[props.session.id] !== undefined)
+  const hoverReady = createMemo(() => hoverMessages() !== undefined)
   const hoverAllowed = createMemo(() => !props.mobile && props.sidebarExpanded())
   const hoverEnabled = createMemo(() => (props.popover ?? true) && hoverAllowed())
   const isActive = createMemo(() => props.session.id === params.id)
