@@ -1835,7 +1835,10 @@ export default function Layout(props: ParentProps) {
     setHoverSession,
   }
 
-  const SidebarPanel = (panelProps: { project: LocalProject | undefined; mobile?: boolean }) => {
+  const SidebarPanel = (panelProps: { project: LocalProject | undefined; mobile?: boolean; merged?: boolean }) => {
+    const merged = createMemo(() => panelProps.mobile || (panelProps.merged ?? layout.sidebar.opened()))
+    const hover = createMemo(() => !panelProps.mobile && panelProps.merged === false && !layout.sidebar.opened())
+    const popover = createMemo(() => !!panelProps.mobile || panelProps.merged === false || layout.sidebar.opened())
     const projectName = createMemo(() => {
       const project = panelProps.project
       if (!project) return ""
@@ -1972,6 +1975,7 @@ export default function Layout(props: ParentProps) {
                           project={p()}
                           sortNow={sortNow}
                           mobile={panelProps.mobile}
+                          popover={popover()}
                         />
                       </div>
                     </>
@@ -2007,6 +2011,7 @@ export default function Layout(props: ParentProps) {
                                   project={p()}
                                   sortNow={sortNow}
                                   mobile={panelProps.mobile}
+                                  popover={popover()}
                                 />
                               )}
                             </For>

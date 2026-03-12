@@ -240,6 +240,7 @@ const WorkspaceActions = (props: {
 const WorkspaceSessionList = (props: {
   slug: Accessor<string>
   mobile?: boolean
+  popover?: boolean
   ctx: WorkspaceSidebarContext
   showNew: Accessor<boolean>
   loading: Accessor<boolean>
@@ -268,6 +269,7 @@ const WorkspaceSessionList = (props: {
           session={session}
           slug={props.slug()}
           mobile={props.mobile}
+          popover={props.popover}
           children={props.children()}
           sidebarExpanded={props.ctx.sidebarExpanded}
           sidebarHovering={props.ctx.sidebarHovering}
@@ -304,6 +306,7 @@ export const SortableWorkspace = (props: {
   project: LocalProject
   sortNow: Accessor<number>
   mobile?: boolean
+  popover?: boolean
 }): JSX.Element => {
   const navigate = useNavigate()
   const params = useParams()
@@ -447,6 +450,7 @@ export const SortableWorkspace = (props: {
           <WorkspaceSessionList
             slug={slug}
             mobile={props.mobile}
+            popover={props.popover}
             ctx={props.ctx}
             showNew={showNew}
             loading={loading}
@@ -467,6 +471,7 @@ export const LocalWorkspace = (props: {
   project: LocalProject
   sortNow: Accessor<number>
   mobile?: boolean
+  popover?: boolean
 }): JSX.Element => {
   const globalSync = useGlobalSync()
   const language = useLanguage()
@@ -490,44 +495,19 @@ export const LocalWorkspace = (props: {
       ref={(el) => props.ctx.setScrollContainerRef(el, props.mobile)}
       class="size-full flex flex-col py-2 overflow-y-auto no-scrollbar [overflow-anchor:none]"
     >
-      <nav class="flex flex-col gap-1 px-2">
-        <Show when={loading()}>
-          <SessionSkeleton />
-        </Show>
-        <For each={sessions()}>
-          {(session) => (
-            <SessionItem
-              session={session}
-              slug={slug()}
-              mobile={props.mobile}
-              children={children()}
-              sidebarExpanded={props.ctx.sidebarExpanded}
-              sidebarHovering={props.ctx.sidebarHovering}
-              nav={props.ctx.nav}
-              hoverSession={props.ctx.hoverSession}
-              setHoverSession={props.ctx.setHoverSession}
-              clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
-              prefetchSession={props.ctx.prefetchSession}
-              archiveSession={props.ctx.archiveSession}
-            />
-          )}
-        </For>
-        <Show when={hasMore()}>
-          <div class="relative w-full py-1">
-            <Button
-              variant="ghost"
-              class="flex w-full text-left justify-start text-14-regular text-text-weak pl-9 pr-10"
-              size="large"
-              onClick={(e: MouseEvent) => {
-                loadMore()
-                ;(e.currentTarget as HTMLButtonElement).blur()
-              }}
-            >
-              {language.t("common.loadMore")}
-            </Button>
-          </div>
-        </Show>
-      </nav>
+      <WorkspaceSessionList
+        slug={slug}
+        mobile={props.mobile}
+        popover={props.popover}
+        ctx={props.ctx}
+        showNew={() => false}
+        loading={loading}
+        sessions={sessions}
+        children={children}
+        hasMore={hasMore}
+        loadMore={loadMore}
+        language={language}
+      />
     </div>
   )
 }
