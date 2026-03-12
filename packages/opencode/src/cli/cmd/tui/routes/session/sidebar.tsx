@@ -97,7 +97,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
           .replace("origin/", "") ||
           Bun.spawnSync(["git", "config", "init.defaultBranch"], { cwd: ws.directory }).stdout.toString().trim() ||
           "dev")
-      const rev = Bun.spawnSync(["git", "rev-list", `HEAD..${base}`, "--count"], { cwd: root })
+      const rev = Bun.spawnSync(["git", "rev-list", `${ws.branch}..${base}`, "--count"], { cwd: root })
       const behind = parseInt(rev.stdout.toString().trim()) || 0
       return {
         branch: ws.branch,
