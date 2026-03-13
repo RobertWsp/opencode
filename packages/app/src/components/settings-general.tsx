@@ -12,6 +12,7 @@ import { usePlatform } from "@/context/platform"
 import { useSettings, monoFontFamily } from "@/context/settings"
 import { playSound, SOUND_OPTIONS } from "@/utils/sound"
 import { Link } from "./link"
+import { SettingsList } from "./settings-list"
 
 let demoSoundState = {
   cleanup: undefined as (() => void) | undefined,
@@ -172,9 +173,7 @@ export const SettingsGeneral: Component = () => {
 
   const AppearanceSection = () => (
     <div class="flex flex-col gap-1">
-      <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.appearance")}</h3>
-
-      <div class="bg-surface-raised-base px-4 rounded-lg">
+      <SettingsList>
         <SettingsRow
           title={language.t("settings.general.row.language.title")}
           description={language.t("settings.general.row.language.description")}
@@ -193,8 +192,70 @@ export const SettingsGeneral: Component = () => {
         </SettingsRow>
 
         <SettingsRow
-          title={language.t("settings.general.row.appearance.title")}
-          description={language.t("settings.general.row.appearance.description")}
+          title={language.t("settings.general.row.reasoningSummaries.title")}
+          description={language.t("settings.general.row.reasoningSummaries.description")}
+        >
+          <div data-action="settings-feed-reasoning-summaries">
+            <Switch
+              checked={settings.general.showReasoningSummaries()}
+              onChange={(checked) => settings.general.setShowReasoningSummaries(checked)}
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title={language.t("settings.general.row.shellToolPartsExpanded.title")}
+          description={language.t("settings.general.row.shellToolPartsExpanded.description")}
+        >
+          <div data-action="settings-feed-shell-tool-parts-expanded">
+            <Switch
+              checked={settings.general.shellToolPartsExpanded()}
+              onChange={(checked) => settings.general.setShellToolPartsExpanded(checked)}
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title={language.t("settings.general.row.editToolPartsExpanded.title")}
+          description={language.t("settings.general.row.editToolPartsExpanded.description")}
+        >
+          <div data-action="settings-feed-edit-tool-parts-expanded">
+            <Switch
+              checked={settings.general.editToolPartsExpanded()}
+              onChange={(checked) => settings.general.setEditToolPartsExpanded(checked)}
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title={language.t("settings.general.row.followup.title")}
+          description={language.t("settings.general.row.followup.description")}
+        >
+          <Select
+            data-action="settings-followup"
+            options={followupOptions()}
+            current={followupOptions().find((o) => o.value === settings.general.followup())}
+            value={(o) => o.value}
+            label={(o) => o.label}
+            onSelect={(option) => option && settings.general.setFollowup(option.value)}
+            variant="secondary"
+            size="small"
+            triggerVariant="settings"
+            triggerStyle={{ "min-width": "180px" }}
+          />
+        </SettingsRow>
+      </SettingsList>
+    </div>
+  )
+
+  const AppearanceSection = () => (
+    <div class="flex flex-col gap-1">
+      <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.appearance")}</h3>
+
+      <SettingsList>
+        <SettingsRow
+          title={language.t("settings.general.row.colorScheme.title")}
+          description={language.t("settings.general.row.colorScheme.description")}
         >
           <Select
             data-action="settings-color-scheme"
@@ -267,7 +328,7 @@ export const SettingsGeneral: Component = () => {
             )}
           </Select>
         </SettingsRow>
-      </div>
+      </SettingsList>
     </div>
   )
 
@@ -319,7 +380,7 @@ export const SettingsGeneral: Component = () => {
     <div class="flex flex-col gap-1">
       <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.notifications")}</h3>
 
-      <div class="bg-surface-raised-base px-4 rounded-lg">
+      <SettingsList>
         <SettingsRow
           title={language.t("settings.general.notifications.agent.title")}
           description={language.t("settings.general.notifications.agent.description")}
@@ -355,7 +416,7 @@ export const SettingsGeneral: Component = () => {
             />
           </div>
         </SettingsRow>
-      </div>
+      </SettingsList>
     </div>
   )
 
@@ -363,7 +424,7 @@ export const SettingsGeneral: Component = () => {
     <div class="flex flex-col gap-1">
       <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.sounds")}</h3>
 
-      <div class="bg-surface-raised-base px-4 rounded-lg">
+      <SettingsList>
         <SettingsRow
           title={language.t("settings.general.sounds.agent.title")}
           description={language.t("settings.general.sounds.agent.description")}
@@ -408,7 +469,7 @@ export const SettingsGeneral: Component = () => {
             )}
           />
         </SettingsRow>
-      </div>
+      </SettingsList>
     </div>
   )
 
@@ -416,7 +477,7 @@ export const SettingsGeneral: Component = () => {
     <div class="flex flex-col gap-1">
       <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.updates")}</h3>
 
-      <div class="bg-surface-raised-base px-4 rounded-lg">
+      <SettingsList>
         <SettingsRow
           title={language.t("settings.updates.row.startup.title")}
           description={language.t("settings.updates.row.startup.description")}
@@ -452,7 +513,7 @@ export const SettingsGeneral: Component = () => {
               : language.t("settings.updates.action.checkNow")}
           </Button>
         </SettingsRow>
-      </div>
+      </SettingsList>
     </div>
   )
 
@@ -482,7 +543,7 @@ export const SettingsGeneral: Component = () => {
               <div class="flex flex-col gap-1">
                 <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.desktop.section.wsl")}</h3>
 
-                <div class="bg-surface-raised-base px-4 rounded-lg">
+                <SettingsList>
                   <SettingsRow
                     title={language.t("settings.desktop.wsl.title")}
                     description={language.t("settings.desktop.wsl.description")}
@@ -495,7 +556,7 @@ export const SettingsGeneral: Component = () => {
                       />
                     </div>
                   </SettingsRow>
-                </div>
+                </SettingsList>
               </div>
             )
           }}
@@ -515,7 +576,7 @@ export const SettingsGeneral: Component = () => {
               <div class="flex flex-col gap-1">
                 <h3 class="text-14-medium text-text-strong pb-2">{language.t("settings.general.section.display")}</h3>
 
-                <div class="bg-surface-raised-base px-4 rounded-lg">
+                <SettingsList>
                   <SettingsRow
                     title={
                       <div class="flex items-center gap-2">
@@ -533,7 +594,7 @@ export const SettingsGeneral: Component = () => {
                       <Switch checked={value() === "wayland"} onChange={onChange} />
                     </div>
                   </SettingsRow>
-                </div>
+                </SettingsList>
               </div>
             )
           }}
