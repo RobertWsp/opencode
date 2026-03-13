@@ -21,6 +21,7 @@ import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
 import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
+import { messageAgentColor } from "@/utils/agent"
 import { parseCommentNote, readCommentMetadata } from "@/utils/comment-note"
 
 type MessageComment = {
@@ -235,6 +236,41 @@ export function MessageTimeline(props: {
     if (!id) return idle
     return sync.data.session_status[id] ?? idle
   })
+  const working = createMemo(() => !!pending() || sessionStatus().type !== "idle")
+  const tint = createMemo(() => messageAgentColor(sessionMessages(), sync.data.agent))
+
+  const [slot, setSlot] = createStore({
+    open: false,
+    show: false,
+    fade: false,
+  })
+
+  let f: number | undefined
+  const clear = () => {
+    if (f !== undefined) window.clearTimeout(f)
+    f = undefined
+  }
+
+  onCleanup(clear)
+  createEffect(
+    on(
+      working,
+      (on, prev) => {
+        clear()
+        if (on) {
+          setSlot({ open: true, show: true, fade: false })
+          return
+        }
+        if (prev) {
+          setSlot({ open: false, show: true, fade: true })
+          f = window.setTimeout(() => setSlot({ show: false, fade: false }), 260)
+          return
+        }
+        setSlot({ open: false, show: false, fade: false })
+      },
+      { defer: true },
+    ),
+  )
   const activeMessageID = createMemo(() => {
     const parentID = pending()?.parentID
     if (parentID) {
@@ -581,33 +617,46 @@ export function MessageTimeline(props: {
                             class="text-14-medium text-text-strong truncate grow-1 min-w-0 pl-2"
                             onDblClick={openTitleEditor}
                           >
-                            {titleValue()}
-                          </h1>
-                        }
-                      >
-                        <InlineInput
-                          ref={(el) => {
-                            titleRef = el
-                          }}
-                          value={title.draft}
-                          disabled={title.saving}
-                          class="text-14-medium text-text-strong grow-1 min-w-0 pl-2 rounded-[6px]"
-                          style={{ "--inline-input-shadow": "var(--shadow-xs-border-select)" }}
-                          onInput={(event) => setTitle("draft", event.currentTarget.value)}
-                          onKeyDown={(event) => {
-                            event.stopPropagation()
-                            if (event.key === "Enter") {
-                              event.preventDefault()
-                              void saveTitleEditor()
-                              return
-                            }
-                            if (event.key === "Escape") {
-                              event.preventDefault()
-                              closeTitleEditor()
-                            }
-                          }}
-                          onBlur={closeTitleEditor}
-                        />
+                            <Spinner class="size-4" style={{ color: tint() ?? "var(--icon-interactive-base)" }} />
+                          </div>
+                        </Show>
+                      </div>
+                      <Show when={titleValue() || title.editing}>
+                        <Show
+                          when={title.editing}
+                          fallback={
+                            <h1
+                              class="text-14-medium text-text-strong truncate grow-1 min-w-0"
+                              onDblClick={openTitleEditor}
+                            >
+                              {titleValue()}
+                            </h1>
+                          }
+                        >
+                          <InlineInput
+                            ref={(el) => {
+                              titleRef = el
+                            }}
+                            value={title.draft}
+                            disabled={title.saving}
+                            class="text-14-medium text-text-strong grow-1 min-w-0 rounded-[6px]"
+                            style={{ "--inline-input-shadow": "var(--shadow-xs-border-select)" }}
+                            onInput={(event) => setTitle("draft", event.currentTarget.value)}
+                            onKeyDown={(event) => {
+                              event.stopPropagation()
+                              if (event.key === "Enter") {
+                                event.preventDefault()
+                                void saveTitleEditor()
+                                return
+                              }
+                              if (event.key === "Escape") {
+                                event.preventDefault()
+                                closeTitleEditor()
+                              }
+                            }}
+                            onBlur={closeTitleEditor}
+                          />
+                        </Show>
                       </Show>
                     </Show>
                   </div>
