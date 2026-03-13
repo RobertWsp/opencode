@@ -250,7 +250,7 @@ const WorkspaceSessionList = (props: {
   loadMore: () => Promise<void>
   language: ReturnType<typeof useLanguage>
 }): JSX.Element => (
-  <nav class="flex flex-col gap-1 px-2">
+  <nav class="flex flex-col gap-1">
     <Show when={props.showNew()}>
       <NewSessionItem
         slug={props.slug()}
@@ -365,7 +365,7 @@ export const SortableWorkspace = (props: {
       }}
     >
       <Collapsible variant="ghost" open={open()} class="shrink-0" onOpenChange={openWrapper}>
-        <div class="px-2 py-1">
+        <div class="py-1">
           <div
             class="group/workspace relative"
             data-component="workspace-item"

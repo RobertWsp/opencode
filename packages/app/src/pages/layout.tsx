@@ -1864,7 +1864,11 @@ export default function Layout(props: ParentProps) {
     return (
       <div
         classList={{
-          "flex flex-col min-h-0 bg-background-stronger border border-b-0 border-border-weak-base rounded-tl-[12px]": true,
+          "flex flex-col min-h-0 min-w-0 box-border rounded-tl-[12px] px-3": true,
+          "border border-b-0 border-border-weak-base": !merged(),
+          "border-l border-t border-border-weaker-base": merged(),
+          "bg-background-base": merged() || hover(),
+          "bg-background-stronger": !merged() && !hover(),
           "flex-1 min-w-0": panelProps.mobile,
         }}
         style={{ width: panelProps.mobile ? undefined : `${Math.max(layout.sidebar.width() - 64, 0)}px` }}
@@ -1872,8 +1876,8 @@ export default function Layout(props: ParentProps) {
         <Show when={panelProps.project}>
           {(p) => (
             <>
-              <div class="shrink-0 px-2 py-1">
-                <div class="group/project flex items-start justify-between gap-2 p-2 pr-1">
+              <div class="shrink-0 pl-1 py-1">
+                <div class="group/project flex items-start justify-between gap-2 py-2 pl-2 pr-0">
                   <div class="flex flex-col min-w-0">
                     <InlineEditor
                       id={`project:${projectId()}`}
@@ -1959,7 +1963,7 @@ export default function Layout(props: ParentProps) {
                   when={workspacesEnabled()}
                   fallback={
                     <>
-                      <div class="shrink-0 py-4 px-3">
+                      <div class="shrink-0 py-4">
                         <Button
                           size="large"
                           icon="plus-small"
@@ -1982,7 +1986,7 @@ export default function Layout(props: ParentProps) {
                   }
                 >
                   <>
-                    <div class="shrink-0 py-4 px-3">
+                    <div class="shrink-0 py-4">
                       <Button size="large" icon="plus-small" class="w-full" onClick={() => createWorkspace(p())}>
                         {language.t("workspace.new")}
                       </Button>
