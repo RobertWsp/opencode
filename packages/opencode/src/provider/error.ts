@@ -41,8 +41,17 @@ export namespace ProviderError {
   }
 
   function error(providerID: string, error: APICallError) {
-    if (providerID.includes("github-copilot") && error.statusCode === 403) {
-      return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
+    if (error.statusCode === 403) {
+      const body = error.responseBody ?? ""
+      if (providerID === "anthropic" || providerID.includes("anthropic")) {
+        if (body.includes("not allowed") || body.includes("organization") || body.includes("OAuth")) {
+          return "OAuth authentication failed — your subscription may have expired or your organization has restricted OAuth access. Please renew your Anthropic subscription or switch to an API key."
+        }
+        return "Permission denied — your account may not have access to this model. Check your Anthropic subscription status."
+      }
+      if (providerID.includes("github-copilot")) {
+        return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
+      }
     }
 
     return error.message

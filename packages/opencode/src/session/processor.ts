@@ -10,6 +10,7 @@ import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import { Provider } from "@/provider/provider"
+import { isAccountExhausted, COOLDOWN_MAX_WAIT_MS } from "@/provider/account-pool"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -67,6 +68,7 @@ export namespace SessionProcessor {
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         let switches = 0
         while (true) {
+          const usedAccount = (await Provider.getPool(input.model.providerID))?.stats().activeIndex
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
@@ -387,33 +389,142 @@ export namespace SessionProcessor {
               if (MessageV2.APIError.isInstance(error)) {
                 const pool = await Provider.getPool(input.model.providerID)
                 if (pool) {
-                  const { activeIndex } = pool.stats()
+                  const faulted = usedAccount ?? pool.stats().activeIndex
+                  const maxSwitches = Math.max(pool.stats().accountCount * 2, 3)
                   if (error.data.statusCode === 429) {
-                    const retryAfterMs = error.data.responseHeaders?.["retry-after-ms"]
+                    const parsed = error.data.responseHeaders?.["retry-after-ms"]
                       ? Number.parseFloat(error.data.responseHeaders["retry-after-ms"])
                       : error.data.responseHeaders?.["retry-after"]
                         ? Number.parseFloat(error.data.responseHeaders["retry-after"]) * 1000
                         : 60_000
-                    pool.cooldown(activeIndex, Date.now() + retryAfterMs)
-                    if (pool.hasHealthy() && switches < 3) {
-                      switches++
-                      await Provider.rotateAccount(input.model.providerID)
-                      if (pool.stats().activeIndex !== activeIndex) {
+                    const retryAfterMs = Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000
+
+                    const exhausted = isAccountExhausted(retryAfterMs, error.data.responseBody)
+                    // Always use cooldown for 429s — even exhausted accounts recover
+                    // when the provider's quota resets. pool.cooldown() caps at 10 min.
+                    pool.cooldown(faulted, Date.now() + retryAfterMs)
+                    await Provider.savePoolNow(input.model.providerID)
+
+                    if (switches < maxSwitches) {
+                      await Provider.syncPool(input.model.providerID)
+
+                      if (pool.hasHealthy()) {
+                        switches++
+                        await Provider.rotateAccount(input.model.providerID)
                         await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
                         continue
                       }
+
+                      // Re-enable disabled accounts — they may have recovered
+                      // from transient auth failures or token refreshes. If they
+                      // truly can't authenticate, the 401 handler will re-disable
+                      // them. Persist immediately so syncPool() won't revert.
+                      let reenabled = false
+                      for (const s of pool.states()) {
+                        if (s.status === "disabled") {
+                          pool.enable(s.info.index)
+                          reenabled = true
+                        }
+                      }
+                      if (reenabled) {
+                        await Provider.savePoolNow(input.model.providerID)
+                        if (pool.hasHealthy()) {
+                          switches++
+                          await Provider.rotateAccount(input.model.providerID)
+                          await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                          continue
+                        }
+                      }
+
+                      let switched = false
+                      while (switches < maxSwitches) {
+                        const hasCooldown = pool.states().some((s) => s.status === "cooldown")
+                        if (!hasCooldown) break
+
+                        const wait = pool.soonestCooldownMs()
+                        if (wait !== undefined && wait > 0) {
+                          const capped = Math.min(wait, COOLDOWN_MAX_WAIT_MS)
+                          switches++
+                          SessionStatus.set(input.sessionID, {
+                            type: "retry",
+                            attempt: switches,
+                            message: exhausted
+                              ? "Account exhausted, waiting for cooldown"
+                              : "All accounts on cooldown, waiting",
+                            next: Date.now() + capped,
+                          })
+                          await SessionRetry.sleep(capped, input.abort).catch(() => {})
+                          await Provider.syncPool(input.model.providerID)
+                        }
+
+                        if (pool.hasHealthy()) {
+                          await Provider.rotateAccount(input.model.providerID)
+                          await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                          switched = true
+                          break
+                        }
+                      }
+                      if (switched) continue
                     }
+
+                    // All switch attempts exhausted or maxSwitches reached —
+                    // terminate instead of falling through to generic retry,
+                    // which would loop forever on the same 429'd account.
+                    log.error("all accounts exhausted", { providerID: input.model.providerID })
+                    input.assistantMessage.error = error
+                    Bus.publish(Session.Event.Error, {
+                      sessionID: input.sessionID,
+                      error,
+                    })
+                    input.assistantMessage.time.completed = Date.now()
+                    await Session.updateMessage(input.assistantMessage)
+                    return "stop"
                   }
-                  if (error.data.statusCode === 401) {
-                    pool.disable(activeIndex)
-                    if (pool.hasHealthy() && switches < 3) {
+                  if (error.data.statusCode === 401 || error.data.statusCode === 403) {
+                    pool.disable(faulted)
+                    await Provider.savePoolNow(input.model.providerID)
+                    if (pool.hasHealthy() && switches < maxSwitches) {
                       switches++
                       await Provider.rotateAccount(input.model.providerID)
-                      if (pool.stats().activeIndex !== activeIndex) {
-                        await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
-                        continue
+                      await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                      continue
+                    }
+
+                    // No active accounts — wait for cooldown accounts to recover
+                    // before giving up (mirrors the 429 handler's wait logic).
+                    if (switches < maxSwitches) {
+                      const wait = pool.soonestCooldownMs()
+                      if (wait !== undefined && wait > 0) {
+                        const capped = Math.min(wait, COOLDOWN_MAX_WAIT_MS)
+                        switches++
+                        SessionStatus.set(input.sessionID, {
+                          type: "retry",
+                          attempt: switches,
+                          message: "Account disabled, waiting for another to recover",
+                          next: Date.now() + capped,
+                        })
+                        await SessionRetry.sleep(capped, input.abort).catch(() => {})
+                        await Provider.syncPool(input.model.providerID)
+                        if (pool.hasHealthy()) {
+                          await Provider.rotateAccount(input.model.providerID)
+                          await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                          continue
+                        }
                       }
                     }
+
+                    log.error("all accounts disabled", {
+                      providerID: input.model.providerID,
+                      statusCode: error.data.statusCode,
+                    })
+                    input.assistantMessage.error = error
+                    Bus.publish(Session.Event.Error, {
+                      sessionID: input.sessionID,
+                      error,
+                    })
+                    input.assistantMessage.time.completed = Date.now()
+                    await Session.updateMessage(input.assistantMessage)
+                    return "stop"
                   }
                 }
               }
