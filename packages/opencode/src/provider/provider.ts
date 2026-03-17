@@ -46,7 +46,14 @@ import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
 import { Installation } from "../installation"
 import { AccountPool, createPool } from "./account-pool"
-import { loadStats, debouncedSave } from "./account-pool-store"
+import {
+  loadStats,
+  debouncedSave,
+  immediateSave,
+  reloadCooldowns,
+  loadActiveIndex,
+  saveActiveIndex,
+} from "./account-pool-store"
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
@@ -1111,7 +1118,7 @@ export namespace Provider {
       }
     }
 
-    // Restore persisted usage stats
+    // Restore persisted usage stats and active index
     for (const [providerID, pool] of pools) {
       const persisted = loadStats(providerID)
       const states = pool.states()
@@ -1124,6 +1131,8 @@ export namespace Provider {
         s.switchCount = p.switchCount
         if (p.status === "disabled") pool.disable(p.index)
       }
+      const saved = loadActiveIndex(providerID)
+      if (saved !== undefined && saved < states.length) pool.setActive(saved)
     }
 
     return {
@@ -1261,9 +1270,53 @@ export namespace Provider {
     const pool = s.pools.get(providerID)
     if (!pool) return
     pool.next()
-    debouncedSave(providerID, pool.states())
-    s.sdk.clear()
-    s.models.clear()
+    immediateSave(providerID, pool.states())
+    saveActiveIndex(providerID, pool.stats().activeIndex)
+    invalidateCache(s, providerID)
+  }
+
+  export async function switchAccount(providerID: string, index: number) {
+    const s = await state()
+    const pool = s.pools.get(providerID)
+    if (!pool) return
+    const states = pool.states()
+    if (index < 0 || index >= states.length) return
+    const target = states[index]
+    if (target.status !== "active") {
+      log.info("switching to unhealthy account", {
+        providerID,
+        index,
+        label: target.info.label,
+        status: target.status,
+      })
+    }
+    pool.switchTo(index)
+    immediateSave(providerID, states)
+    saveActiveIndex(providerID, index)
+    invalidateCache(s, providerID)
+  }
+
+  function invalidateCache(s: Awaited<ReturnType<typeof state>>, providerID: string) {
+    for (const key of s.sdk.keys()) {
+      if (key.includes(providerID)) s.sdk.delete(key)
+    }
+    for (const key of s.models.keys()) {
+      if (key.startsWith(providerID + "/")) s.models.delete(key)
+    }
+  }
+
+  export async function syncPool(providerID: string) {
+    const s = await state()
+    const pool = s.pools.get(providerID)
+    if (!pool) return
+    reloadCooldowns(providerID, pool.states())
+  }
+
+  export async function savePoolNow(providerID: string) {
+    const s = await state()
+    const pool = s.pools.get(providerID)
+    if (!pool) return
+    immediateSave(providerID, pool.states())
   }
 
   export async function trackUsage(providerID: string, tokens: number) {

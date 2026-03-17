@@ -299,6 +299,43 @@ export const ProviderRoutes = lazy(() =>
       },
     )
     .post(
+      "/:providerID/accounts/switch",
+      describeRoute({
+        summary: "Switch active account",
+        description: "Switch the active account in a provider's account pool by index.",
+        operationId: "provider.accounts.switch",
+        responses: {
+          200: {
+            description: "Account switched",
+            content: {
+              "application/json": {
+                schema: resolver(z.boolean()),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          providerID: z.string().meta({ description: "Provider ID" }),
+        }),
+      ),
+      validator(
+        "json",
+        z.object({
+          index: z.number().meta({ description: "Account index to switch to" }),
+        }),
+      ),
+      async (c) => {
+        const { providerID } = c.req.valid("param")
+        const { index } = c.req.valid("json")
+        await Provider.switchAccount(providerID, index)
+        return c.json(true)
+      },
+    )
+    .post(
       "/:providerID/accounts/remove",
       describeRoute({
         summary: "Remove account",

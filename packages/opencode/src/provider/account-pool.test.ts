@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "bun:test"
-import { createPool } from "./account-pool"
+import { createPool, isAccountExhausted } from "./account-pool"
 
 // Test fixtures
 const acct1 = { key: "sk-ant-test-aaaa", label: "Account-1", providerID: "anthropic" }
@@ -20,57 +20,51 @@ describe("selection", () => {
   })
 
   it("returns account with lowest requestCount", () => {
-    pool.increment(0, 0) // acct1: 1 request
-    pool.increment(0, 0) // acct1: 2 requests
-    pool.increment(1, 0) // acct2: 1 request
-    // acct3 has 0 — should be selected
+    pool.increment(0, 0)
+    pool.increment(0, 0)
+    pool.increment(1, 0)
     const next = pool.next()
-    expect(next.index).toBe(2)
-    expect(next.label).toBe("Account-3")
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
+    expect(next!.label).toBe("Account-3")
   })
 
   it("breaks ties by lowest lastUsedAt", () => {
-    // All have same requestCount (0)
-    // acct1 used at t=1000, acct2 at t=2000, acct3 at t=3000
-    // acct1 should be selected (oldest)
     const states = pool.states()
-    // Manually set lastUsedAt to simulate usage
     states[0].lastUsedAt = 1000
     states[1].lastUsedAt = 2000
     states[2].lastUsedAt = 3000
 
     const next = pool.next()
-    expect(next.index).toBe(0)
-    expect(next.label).toBe("Account-1")
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(0)
+    expect(next!.label).toBe("Account-1")
   })
 
   it("skips accounts in cooldown status", () => {
-    // Put acct1 and acct2 on cooldown
     pool.cooldown(0, Date.now() + 10000)
     pool.cooldown(1, Date.now() + 10000)
-    // Only acct3 is active — should be selected
     const next = pool.next()
-    expect(next.index).toBe(2)
-    expect(next.label).toBe("Account-3")
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
+    expect(next!.label).toBe("Account-3")
   })
 
   it("skips disabled accounts", () => {
-    // Disable acct1 and acct2
     pool.disable(0)
     pool.disable(1)
-    // Only acct3 is active — should be selected
     const next = pool.next()
-    expect(next.index).toBe(2)
-    expect(next.label).toBe("Account-3")
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
+    expect(next!.label).toBe("Account-3")
   })
 
   it("returns only remaining account if others all cooldown", () => {
-    // Put acct1 and acct2 on cooldown
     pool.cooldown(0, Date.now() + 10000)
     pool.cooldown(1, Date.now() + 10000)
-    // acct3 is the only active one
     const next = pool.next()
-    expect(next.index).toBe(2)
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
   })
 })
 
@@ -87,13 +81,12 @@ describe("cooldown", () => {
     expect(states[0].status).toBe("cooldown")
   })
 
-  it("caps cooldown duration at 300 seconds", () => {
+  it("caps cooldown duration at 600 seconds", () => {
     const now = Date.now()
-    const farFuture = now + 600000 // 600 seconds
+    const farFuture = now + 1200000 // 1200 seconds
     pool.cooldown(0, farFuture)
     const states = pool.states()
-    // cooldownUntil should not exceed now + 300000
-    expect(states[0].cooldownUntil).toBeLessThanOrEqual(now + 300000)
+    expect(states[0].cooldownUntil).toBeLessThanOrEqual(now + 600000)
   })
 
   it("auto-expires cooldown when next() called after expiry", () => {
@@ -146,10 +139,10 @@ describe("disable", () => {
   it("disabled account never returned by next()", () => {
     pool.disable(0)
     pool.disable(1)
-    // Only acct3 should be returned
     const next = pool.next()
-    expect(next.index).toBe(2)
-    expect(next.label).toBe("Account-3")
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
+    expect(next!.label).toBe("Account-3")
   })
 
   it("enable() restores disabled account to active", () => {
@@ -170,40 +163,65 @@ describe("rotation", () => {
     pool = createPool([acct1, acct2, acct3])
   })
 
-  it("returns soonest-expiring account when all are exhausted", () => {
-    // Mark all as cooldown with different expiry times
+  it("returns undefined when all accounts are exhausted", () => {
     const now = Date.now()
-    pool.cooldown(0, now + 5000) // expires in 5s
-    pool.cooldown(1, now + 10000) // expires in 10s
-    pool.cooldown(2, now + 3000) // expires in 3s (soonest)
+    pool.cooldown(0, now + 5000)
+    pool.cooldown(1, now + 10000)
+    pool.cooldown(2, now + 3000)
 
-    // next() should return acct2 (index 2, soonest expiry)
     const next = pool.next()
-    expect(next.index).toBe(2)
+    expect(next).toBeUndefined()
+  })
+
+  it("soonestCooldownMs returns ms until soonest expiry", () => {
+    const now = Date.now()
+    pool.cooldown(0, now + 5000)
+    pool.cooldown(1, now + 10000)
+    pool.cooldown(2, now + 3000)
+
+    const ms = pool.soonestCooldownMs()
+    expect(ms).toBeDefined()
+    expect(ms!).toBeLessThanOrEqual(3000)
+    expect(ms!).toBeGreaterThan(0)
   })
 
   it("emits account.switched event on next() when active changes", () => {
-    let switchedEvent: { from: number; to: number } | null = null
-
-    // Mock event listener (would be real event emitter in implementation)
     const pool2 = createPool([acct1, acct2, acct3])
-    // Disable acct1 to force switch
     pool2.disable(0)
 
-    // Call next() — should trigger switch from 0 to 1
     const next = pool2.next()
-    expect(next.index).not.toBe(0)
+    expect(next).toBeDefined()
+    expect(next!.index).not.toBe(0)
   })
 
   it("handles concurrent next() calls safely (mutex)", async () => {
-    // Simulate concurrent calls
     const promises = [Promise.resolve(pool.next()), Promise.resolve(pool.next()), Promise.resolve(pool.next())]
 
     const results = await Promise.all(promises)
-    // All should return valid accounts
-    results.forEach((r: typeof results[0]) => {
-      expect(r.index).toBeGreaterThanOrEqual(0)
-      expect(r.index).toBeLessThan(3)
+    results.forEach((r: (typeof results)[0]) => {
+      expect(r).toBeDefined()
+      expect(r!.index).toBeGreaterThanOrEqual(0)
+      expect(r!.index).toBeLessThan(3)
+    })
+  })
+
+  it("emits account.switched event on next() when active changes", () => {
+    const pool2 = createPool([acct1, acct2, acct3])
+    pool2.disable(0)
+
+    const next = pool2.next()
+    expect(next).toBeDefined()
+    expect(next!.index).not.toBe(0)
+  })
+
+  it("handles concurrent next() calls safely (mutex)", async () => {
+    const promises = [Promise.resolve(pool.next()), Promise.resolve(pool.next()), Promise.resolve(pool.next())]
+
+    const results = await Promise.all(promises)
+    results.forEach((r: (typeof results)[0]) => {
+      expect(r).toBeDefined()
+      expect(r!.index).toBeGreaterThanOrEqual(0)
+      expect(r!.index).toBeLessThan(3)
     })
   })
 })
@@ -314,6 +332,159 @@ describe("config", () => {
   })
 })
 
+describe("re-enable disabled for fallback", () => {
+  it("re-enabled accounts become healthy when active one is in cooldown", () => {
+    const pool = createPool([acct1, acct2, acct3])
+    pool.disable(1)
+    pool.disable(2)
+    pool.cooldown(0, Date.now() + 60_000)
+    expect(pool.hasHealthy()).toBe(false)
+
+    for (const s of pool.states()) {
+      if (s.status === "disabled") pool.enable(s.info.index)
+    }
+    expect(pool.hasHealthy()).toBe(true)
+
+    const next = pool.next()
+    expect(next).toBeDefined()
+    expect(next!.index).not.toBe(0)
+  })
+
+  it("enable() clears cooldownUntil", () => {
+    const pool = createPool([acct1, acct2])
+    pool.disable(0)
+    expect(pool.states()[0].status).toBe("disabled")
+
+    pool.enable(0)
+    expect(pool.states()[0].status).toBe("active")
+    expect(pool.states()[0].cooldownUntil).toBeUndefined()
+  })
+
+  it("next() selects re-enabled account with lowest requestCount", () => {
+    const pool = createPool([acct1, acct2, acct3])
+    pool.increment(0, 0)
+    pool.increment(0, 0)
+    pool.increment(1, 0)
+    pool.disable(1)
+    pool.disable(2)
+    pool.cooldown(0, Date.now() + 60_000)
+
+    for (const s of pool.states()) {
+      if (s.status === "disabled") pool.enable(s.info.index)
+    }
+
+    const next = pool.next()
+    expect(next).toBeDefined()
+    expect(next!.index).toBe(2)
+  })
+
+  it("re-enable all disabled → disable on 401 → only faulted disabled", () => {
+    const pool = createPool([acct1, acct2, acct3])
+    pool.disable(1)
+    pool.disable(2)
+    pool.cooldown(0, Date.now() + 60_000)
+
+    for (const s of pool.states()) {
+      if (s.status === "disabled") pool.enable(s.info.index)
+    }
+    expect(pool.stats().activeCount).toBe(2)
+
+    pool.disable(1)
+    expect(pool.states()[1].status).toBe("disabled")
+    expect(pool.states()[2].status).toBe("active")
+    expect(pool.hasHealthy()).toBe(true)
+  })
+
+  it("hasHealthy false when all disabled + all cooldown", () => {
+    const pool = createPool([acct1, acct2, acct3])
+    pool.cooldown(0, Date.now() + 60_000)
+    pool.disable(1)
+    pool.disable(2)
+    expect(pool.hasHealthy()).toBe(false)
+    expect(pool.soonestCooldownMs()).toBeDefined()
+    expect(pool.soonestCooldownMs()!).toBeGreaterThan(0)
+  })
+
+  it("soonestCooldownMs ignores disabled accounts", () => {
+    const pool = createPool([acct1, acct2])
+    pool.disable(0)
+    pool.cooldown(1, Date.now() + 5000)
+    const ms = pool.soonestCooldownMs()
+    expect(ms).toBeDefined()
+    expect(ms!).toBeLessThanOrEqual(5000)
+  })
+
+  it("single account pool: disable then enable restores functionality", () => {
+    const pool = createPool([acct1])
+    pool.disable(0)
+    expect(pool.hasHealthy()).toBe(false)
+    expect(pool.next()).toBeUndefined()
+
+    pool.enable(0)
+    expect(pool.hasHealthy()).toBe(true)
+    expect(pool.next()).toBeDefined()
+  })
+})
+
+describe("exhaustion detection", () => {
+  it("retryAfterMs >= 300s is exhausted", () => {
+    expect(isAccountExhausted(300_000)).toBe(true)
+    expect(isAccountExhausted(600_000)).toBe(true)
+  })
+
+  it("retryAfterMs < 300s is not exhausted", () => {
+    expect(isAccountExhausted(60_000)).toBe(false)
+    expect(isAccountExhausted(120_000)).toBe(false)
+  })
+
+  it("body patterns detect quota exhaustion", () => {
+    expect(isAccountExhausted(60_000, "insufficient quota")).toBe(true)
+    expect(isAccountExhausted(60_000, "billing issue")).toBe(true)
+    expect(isAccountExhausted(60_000, "plan limit reached")).toBe(true)
+    expect(isAccountExhausted(60_000, "usage limit exceeded")).toBe(true)
+    expect(isAccountExhausted(60_000, "free usage exceeded")).toBe(true)
+    expect(isAccountExhausted(60_000, "credits exhausted")).toBe(true)
+    expect(isAccountExhausted(60_000, "FreeUsageLimitError")).toBe(true)
+    expect(isAccountExhausted(60_000, "exceeded monthly limit")).toBe(true)
+  })
+
+  it("normal 429 body is not exhausted", () => {
+    expect(isAccountExhausted(60_000, "rate limit exceeded")).toBe(false)
+    expect(isAccountExhausted(60_000, "too many requests")).toBe(false)
+    expect(isAccountExhausted(60_000)).toBe(false)
+  })
+})
+
+describe("cooldown expiration edge cases", () => {
+  it("soonestCooldownMs returns 0 for already-expired cooldowns", () => {
+    const pool = createPool([acct1, acct2])
+    pool.cooldown(0, Date.now() - 1000)
+    const ms = pool.soonestCooldownMs()
+    expect(ms).toBeUndefined()
+  })
+
+  it("hasHealthy expires stale cooldowns before checking", () => {
+    const pool = createPool([acct1])
+    pool.cooldown(0, Date.now() - 1000)
+    expect(pool.hasHealthy()).toBe(true)
+    expect(pool.states()[0].status).toBe("active")
+  })
+
+  it("soonestCooldownMs returns undefined when only disabled accounts remain", () => {
+    const pool = createPool([acct1, acct2])
+    pool.disable(0)
+    pool.disable(1)
+    expect(pool.soonestCooldownMs()).toBeUndefined()
+  })
+
+  it("cooldown caps at 600 seconds from now", () => {
+    const pool = createPool([acct1])
+    const now = Date.now()
+    pool.cooldown(0, now + 900_000)
+    expect(pool.states()[0].cooldownUntil!).toBeLessThanOrEqual(now + 600_001)
+  })
+})
+
 describe("active", () => {
   let pool: ReturnType<typeof createPool>
 
@@ -338,7 +509,8 @@ describe("active", () => {
   it("updates active account after next() changes selection", () => {
     pool.disable(0)
     const next = pool.next()
+    expect(next).toBeDefined()
     const active = pool.active()
-    expect(active.index).toBe(next.index)
+    expect(active.index).toBe(next!.index)
   })
 })

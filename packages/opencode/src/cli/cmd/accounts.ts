@@ -293,7 +293,7 @@ export const AccountsSwitchCommand = cmd({
           return
         }
 
-        pool.switchTo(idx)
+        await Provider.switchAccount(args.provider, idx)
         const info = pool.active()
         prompts.log.success(`Switched to ${info.label} (index ${info.index})`)
         prompts.outro("Done")

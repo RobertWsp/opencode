@@ -5,6 +5,8 @@
 
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
+import { GlobalBus } from "@/bus/global"
+import { Log } from "@/util/log"
 import z from "zod"
 
 export namespace AccountPool {
@@ -84,13 +86,18 @@ export namespace AccountPool {
      */
     key(): string
 
-
     /**
      * Get the next account to use.
-     * Selects the least-used account, skipping those in cooldown or disabled.
-     * @returns The Info of the next account to use
+     * Selects the least-used active account, skipping those in cooldown or disabled.
+     * Returns undefined when no healthy account is available.
      */
-    next(): Info
+    next(): Info | undefined
+
+    /**
+     * Returns ms until the soonest cooldown expires, or undefined if no accounts
+     * are in cooldown. Used by callers to sleep-then-retry instead of busy-looping.
+     */
+    soonestCooldownMs(): number | undefined
 
     /**
      * Mark an account as on cooldown (e.g., after receiving a 429 response).
@@ -153,6 +160,13 @@ export namespace AccountPool {
      * @returns The auth key string (e.g., "anthropic", "anthropic:1")
      */
     authKey(): string
+
+    /**
+     * Restore the active account index without emitting events.
+     * Used during pool initialization to restore persisted state.
+     * @param index - Zero-based index of the account to make active
+     */
+    setActive(index: number): void
   }
 
   /**
@@ -198,6 +212,7 @@ export namespace AccountPool {
       "account.status",
       z.object({
         providerID: z.string(),
+        activeIndex: z.number(),
         accounts: z.array(
           z.object({
             index: z.number(),
@@ -216,17 +231,46 @@ export namespace AccountPool {
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
+const log = Log.create({ service: "account-pool" })
+
 type AccountInput = { key: string; label?: string; providerID: string; authKey?: string }
 
-function tryPublish<D extends BusEvent.Definition>(def: D, props: Parameters<typeof Bus.publish<D>>[1]) {
-  Bus.publish(def, props).catch(() => {})
+// regex patterns signaling permanent account exhaustion (quota/billing), not temporary rate limit
+const EXHAUSTION_PATTERNS = [
+  /insufficient.?quota/i,
+  /billing/i,
+  /plan.?limit/i,
+  /usage.?limit/i,
+  /free.?usage/i,
+  /account.?limit/i,
+  /exceeded.*(?:monthly|daily|weekly)/i,
+  /FreeUsageLimitError/i,
+  /credits?.?(?:exhausted|depleted|exceeded)/i,
+]
+
+export const EXHAUSTION_RETRY_AFTER_MS = 300_000
+export const COOLDOWN_MAX_WAIT_MS = 120_000
+
+export function isAccountExhausted(retryAfterMs: number, body?: string): boolean {
+  if (retryAfterMs >= EXHAUSTION_RETRY_AFTER_MS) return true
+  if (body && EXHAUSTION_PATTERNS.some((p) => p.test(body))) return true
+  return false
 }
 
-function emitStatus(pool_states: AccountPool.State[]) {
+function tryPublish<D extends BusEvent.Definition>(def: D, props: Parameters<typeof Bus.publish<D>>[1]) {
+  Bus.publish(def, props).catch((err) => {
+    log.error("failed to publish event", { type: def.type, error: err })
+  })
+  // Propagate to GlobalBus so other instances in the same process see the event
+  GlobalBus.emit("event", { payload: { type: def.type, properties: props } })
+}
+
+function emitStatus(pool_states: AccountPool.State[], active: number) {
   if (!pool_states.length) return
   const providerID = pool_states[0].info.providerID
   tryPublish(AccountPool.Event.Status, {
     providerID,
+    activeIndex: active,
     accounts: pool_states.map((s) => ({
       index: s.info.index,
       label: s.info.label,
@@ -249,7 +293,7 @@ function expireCooldowns(pool_states: AccountPool.State[]) {
   }
 }
 
-function selectLeastUsed(pool_states: AccountPool.State[]): number {
+function selectLeastUsed(pool_states: AccountPool.State[]): number | undefined {
   expireCooldowns(pool_states)
   const active = pool_states.filter((s) => s.status === "active")
   if (active.length) {
@@ -259,20 +303,19 @@ function selectLeastUsed(pool_states: AccountPool.State[]): number {
     })
     return best.info.index
   }
-  // All exhausted — return soonest cooldown
+  return undefined
+}
+
+function soonestCooldown(pool_states: AccountPool.State[]): number | undefined {
   const cooldowns = pool_states.filter((s) => s.status === "cooldown" && s.cooldownUntil !== undefined)
-  if (cooldowns.length) {
-    const soonest = cooldowns.reduce((a, b) => (a.cooldownUntil! < b.cooldownUntil! ? a : b))
-    return soonest.info.index
-  }
-  return 0
+  if (!cooldowns.length) return undefined
+  const soonest = cooldowns.reduce((a, b) => (a.cooldownUntil! < b.cooldownUntil! ? a : b))
+  return soonest.cooldownUntil
 }
 
 export function createPool(accounts: AccountInput[] | string): AccountPool.Pool {
   const inputs: AccountInput[] =
-    typeof accounts === "string"
-      ? [{ key: accounts, label: "Account #1", providerID: "anthropic" }]
-      : accounts
+    typeof accounts === "string" ? [{ key: accounts, label: "Account #1", providerID: "anthropic" }] : accounts
 
   const valid = inputs.filter((a) => a.key != null && a.key !== "")
 
@@ -312,6 +355,7 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
       rotating = true
       try {
         const selected = selectLeastUsed(pool_states)
+        if (selected === undefined) return undefined
         if (selected !== activeIndex) {
           const from = pool_states[activeIndex]
           const to = pool_states[selected]
@@ -331,9 +375,16 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
       }
     },
 
+    soonestCooldownMs() {
+      expireCooldowns(pool_states)
+      const until = soonestCooldown(pool_states)
+      if (until === undefined) return undefined
+      return Math.max(until - Date.now(), 0)
+    },
+
     cooldown(index, until) {
       const s = pool_states[index]
-      const capped = Math.min(until, Date.now() + 300_000)
+      const capped = Math.min(until, Date.now() + 600_000)
       s.cooldownUntil = capped
       s.status = "cooldown"
       tryPublish(AccountPool.Event.Cooldown, {
@@ -342,23 +393,34 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
         cooldownUntil: capped,
         reason: "429",
       })
-      emitStatus(pool_states)
+      emitStatus(pool_states, activeIndex)
     },
 
     disable(index) {
       pool_states[index].status = "disabled"
-      emitStatus(pool_states)
+      emitStatus(pool_states, activeIndex)
     },
 
     enable(index) {
       pool_states[index].status = "active"
       pool_states[index].cooldownUntil = undefined
-      emitStatus(pool_states)
+      emitStatus(pool_states, activeIndex)
     },
 
     switchTo(index) {
       const from = pool_states[activeIndex]
       const to = pool_states[index]
+      // Re-enable on manual switch — user explicitly chose this account,
+      // they may have renewed their subscription or fixed the issue.
+      if (to.status === "disabled" || to.status === "cooldown") {
+        log.info("re-enabling account on manual switch", {
+          index,
+          label: to.info.label,
+          previous: to.status,
+        })
+        to.status = "active"
+        to.cooldownUntil = undefined
+      }
       to.switchCount++
       tryPublish(AccountPool.Event.Switched, {
         providerID: to.info.providerID,
@@ -369,7 +431,7 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
         reason: "manual",
       })
       activeIndex = index
-      emitStatus(pool_states)
+      emitStatus(pool_states, activeIndex)
     },
 
     increment(index, tokens) {
@@ -396,6 +458,10 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
     hasHealthy() {
       expireCooldowns(pool_states)
       return pool_states.some((s) => s.status === "active")
+    },
+
+    setActive(index) {
+      if (index >= 0 && index < pool_states.length) activeIndex = index
     },
   }
 }
