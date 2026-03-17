@@ -1,4 +1,5 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+import { APICallError } from "ai"
 import { Log } from "../util/log"
 import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
@@ -138,7 +139,16 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
     }).toString(),
   })
   if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`)
+    const body = await response.text().catch(() => "")
+    log.error("codex token refresh failed", { status: response.status, body })
+    throw new APICallError({
+      message: `Codex OAuth token refresh failed: ${response.status}${body ? ` — ${body}` : ""}`,
+      url: `${ISSUER}/oauth/token`,
+      requestBodyValues: { grant_type: "refresh_token" },
+      statusCode: response.status,
+      responseBody: body,
+      isRetryable: false,
+    })
   }
   return response.json()
 }

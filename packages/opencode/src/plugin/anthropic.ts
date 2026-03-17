@@ -1,4 +1,5 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+import { APICallError } from "ai"
 import { Log } from "../util/log"
 import { OAUTH_DUMMY_KEY, Auth } from "../auth"
 import { generatePKCE } from "@openauthjs/openauth/pkce"
@@ -83,7 +84,18 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                     client_id: CLIENT_ID,
                   }),
                 })
-                if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`)
+                if (!response.ok) {
+                  const body = await response.text().catch(() => "")
+                  log.error("token refresh failed", { status: response.status, body, authKey })
+                  throw new APICallError({
+                    message: `Anthropic OAuth token refresh failed: ${response.status}${body ? ` — ${body}` : ""}`,
+                    url: "https://console.anthropic.com/v1/oauth/token",
+                    requestBodyValues: { grant_type: "refresh_token" },
+                    statusCode: response.status,
+                    responseBody: body,
+                    isRetryable: false,
+                  })
+                }
                 const json = (await response.json()) as {
                   refresh_token: string
                   access_token: string
