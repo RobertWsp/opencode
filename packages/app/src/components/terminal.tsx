@@ -64,6 +64,13 @@ const debugTerminal = (...values: unknown[]) => {
   console.debug("[terminal]", ...values)
 }
 
+const errorName = (err: unknown) => {
+  if (!err || typeof err !== "object") return
+  if (!("name" in err)) return
+  const errorName = err.name
+  return typeof errorName === "string" ? errorName : undefined
+}
+
 const useTerminalUiBindings = (input: {
   container: HTMLDivElement
   term: Term
@@ -503,7 +510,17 @@ export const Terminal = (props: TerminalProps) => {
       }
       socket.addEventListener("error", handleError)
 
-      const handleClose = (event: CloseEvent) => {
+      const gone = () =>
+        sdk.client.pty
+          .get({ ptyID: id })
+          .then(() => false)
+          .catch((err) => {
+            if (errorName(err) === "NotFoundError") return true
+            debugTerminal("failed to inspect terminal session", err)
+            return false
+          })
+
+      const retry = (err: unknown) => {
         if (disposed) return
         if (closing) return
         // Normal closure (code 1000) means PTY process exited - server event handles cleanup
