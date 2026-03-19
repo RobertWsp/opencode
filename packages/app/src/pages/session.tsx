@@ -413,8 +413,21 @@ export default function Page() {
 
   const info = createMemo(() => (params.id ? sync.session.get(params.id) : undefined))
   const diffs = createMemo(() => (params.id ? (sync.data.session_diff[params.id] ?? []) : []))
-  const reviewCount = createMemo(() => Math.max(info()?.summary?.files ?? 0, diffs().length))
-  const hasReview = createMemo(() => reviewCount() > 0)
+  const sessionCount = createMemo(() => Math.max(info()?.summary?.files ?? 0, diffs().length))
+  const hasSessionReview = createMemo(() => sessionCount() > 0)
+  const canReview = createMemo(() => !!params.dir)
+  const reviewTab = createMemo(() => isDesktop())
+  const tabState = createSessionTabs({
+    tabs,
+    pathFromTab: file.pathFromTab,
+    normalizeTab,
+    review: reviewTab,
+    hasReview: canReview,
+  })
+  const contextOpen = tabState.contextOpen
+  const openedTabs = tabState.openedTabs
+  const activeTab = tabState.activeTab
+  const activeFileTab = tabState.activeFileTab
   const revertMessageID = createMemo(() => info()?.revert?.messageID)
   const messages = createMemo(() => (params.id ? (sync.data.message[params.id] ?? []) : []))
   const messagesReady = createMemo(() => {
@@ -918,6 +931,18 @@ export default function Page() {
       </div>
     </div>
   )
+
+  const mobileReview = () =>
+    reviewContent({
+      diffStyle: "unified",
+      classes: {
+        root: "pb-8",
+        header: "px-4",
+        container: "px-4",
+      },
+      loadingClass: "px-4 py-4 text-text-weak",
+      emptyClass: "h-full pb-64 -mt-4 flex flex-col items-center justify-center text-center gap-6",
+    })
 
   createEffect(
     on(
@@ -1538,14 +1563,30 @@ export default function Page() {
     <div class="relative bg-background-base size-full overflow-hidden flex flex-col">
       <SessionHeader />
       <div class="flex-1 min-h-0 flex flex-col md:flex-row">
-        <SessionMobileTabs
-          open={!isDesktop() && !!params.id}
-          mobileTab={store.mobileTab}
-          hasReview={hasReview()}
-          reviewCount={reviewCount()}
-          onSession={() => setStore("mobileTab", "session")}
-          onChanges={() => setStore("mobileTab", "changes")}
-        />
+        <Show when={!isDesktop() && canReview()}>
+          <Tabs value={store.mobileTab} class="h-auto">
+            <Tabs.List>
+              <Tabs.Trigger
+                value="session"
+                class="!w-1/2 !max-w-none"
+                classes={{ button: "w-full" }}
+                onClick={() => setStore("mobileTab", "session")}
+              >
+                {language.t("session.tab.session")}
+              </Tabs.Trigger>
+              <Tabs.Trigger
+                value="changes"
+                class="!w-1/2 !max-w-none !border-r-0"
+                classes={{ button: "w-full" }}
+                onClick={() => setStore("mobileTab", "changes")}
+              >
+                {hasReview()
+                  ? language.t("session.review.filesChanged", { count: reviewCount() })
+                  : language.t("session.review.change.other")}
+              </Tabs.Trigger>
+            </Tabs.List>
+          </Tabs>
+        </Show>
 
         {/* Session panel */}
         <div
@@ -1564,16 +1605,8 @@ export default function Page() {
                 <Show when={activeMessage()}>
                   <MessageTimeline
                     mobileChanges={mobileChanges()}
-                    mobileFallback={reviewContent({
-                      diffStyle: "unified",
-                      classes: {
-                        root: "pb-8",
-                        header: "px-4",
-                        container: "px-4",
-                      },
-                      loadingClass: "px-4 py-4 text-text-weak",
-                      emptyClass: "h-full pb-30 flex flex-col items-center justify-center text-center gap-6",
-                    })}
+                    mobileFallback={mobileReview()}
+                    actions={actions}
                     scroll={ui.scroll}
                     onResumeScroll={resumeScroll}
                     setScrollRef={setScrollRef}
@@ -1607,23 +1640,9 @@ export default function Page() {
                 </Show>
               </Match>
               <Match when={true}>
-                <NewSessionView
-                  worktree={newSessionWorktree()}
-                  onWorktreeChange={(value) => {
-                    if (value === "create") {
-                      setStore("newSessionWorktree", value)
-                      return
-                    }
-
-                    setStore("newSessionWorktree", "main")
-
-                    const target = value === "main" ? sync.project?.worktree : value
-                    if (!target) return
-                    if (target === sdk.directory) return
-                    layout.projects.open(target)
-                    navigate(`/${base64Encode(target)}/session`)
-                  }}
-                />
+                <Show when={mobileChanges()} fallback={<NewSessionView worktree={newSessionWorktree()} />}>
+                  <div class="relative h-full overflow-hidden">{mobileReview()}</div>
+                </Show>
               </Match>
             </Switch>
           </div>
