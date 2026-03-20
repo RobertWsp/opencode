@@ -31,14 +31,18 @@ function generateBillingHeader(userText: string): string {
   return `x-anthropic-billing-header: cc_version=${CLI_VERSION}.${hash}; cc_entrypoint=${entrypoint}; cch=00000;`
 }
 
+const TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+const SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+
 async function authorize(mode: "max" | "console") {
   const pkce = await generatePKCE()
-  const url = new URL(`https://${mode === "console" ? "console.anthropic.com" : "claude.ai"}/oauth/authorize`)
+  const url = new URL(`https://${mode === "console" ? "platform.claude.com" : "claude.ai"}/oauth/authorize`)
   url.searchParams.set("code", "true")
   url.searchParams.set("client_id", CLIENT_ID)
   url.searchParams.set("response_type", "code")
-  url.searchParams.set("redirect_uri", "https://console.anthropic.com/oauth/code/callback")
-  url.searchParams.set("scope", "org:create_api_key user:profile user:inference")
+  url.searchParams.set("redirect_uri", REDIRECT_URI)
+  url.searchParams.set("scope", SCOPES)
   url.searchParams.set("code_challenge", pkce.challenge)
   url.searchParams.set("code_challenge_method", "S256")
   url.searchParams.set("state", pkce.verifier)
@@ -55,11 +59,11 @@ async function exchange(code: string, verifier: string) {
     code: cleanCode,
     code_verifier: verifier,
     client_id: CLIENT_ID,
-    redirect_uri: "https://console.anthropic.com/oauth/code/callback",
+    redirect_uri: REDIRECT_URI,
     state: verifier,
   })
 
-  const result = await fetch("https://console.anthropic.com/v1/oauth/token", {
+  const result = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -114,7 +118,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   refresh_token: auth.refresh,
                   client_id: CLIENT_ID,
                 })
-                const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
+                const response = await fetch(TOKEN_URL, {
                   method: "POST",
                   headers: {
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -127,7 +131,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   log.error("token refresh failed", { status: response.status, body, authKey })
                   throw new APICallError({
                     message: `Anthropic OAuth token refresh failed: ${response.status}${body ? ` — ${body}` : ""}`,
-                    url: "https://console.anthropic.com/v1/oauth/token",
+                    url: TOKEN_URL,
                     requestBodyValues: { grant_type: "refresh_token" },
                     statusCode: response.status,
                     responseBody: body,
