@@ -244,9 +244,11 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 "prompt-caching-scope-2026-01-05",
                 "claude-code-20250219",
               ]
-              // context-1m-2025-08-07: enables 1M context for 4.6 models but requires Extra Usage billing
-              // Enable via env var ANTHROPIC_1M_CONTEXT=true when Extra Usage is active on your account
-              if (process.env.ANTHROPIC_1M_CONTEXT === "true") required.push("context-1m-2025-08-07")
+              // context-1m for 4.6 models — disable via ANTHROPIC_1M_CONTEXT=false if Extra Usage is not active
+              const ml = modelId.toLowerCase()
+              if ((ml.includes("sonnet-4-6") || ml.includes("opus-4-6")) && process.env.ANTHROPIC_1M_CONTEXT !== "false") {
+                required.push("context-1m-2025-08-07")
+              }
               const merged = [...new Set([...required, ...existing])].join(",")
 
               headers.set("authorization", `Bearer ${auth.access}`)
