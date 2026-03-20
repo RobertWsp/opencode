@@ -244,7 +244,9 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 "prompt-caching-scope-2026-01-05",
                 "claude-code-20250219",
               ]
-              // Note: context-1m-2025-08-07 requires "Extra Usage" billing — omit to use 200k context
+              // context-1m-2025-08-07: enables 1M context for 4.6 models but requires Extra Usage billing
+              // Enable via env var ANTHROPIC_1M_CONTEXT=true when Extra Usage is active on your account
+              if (process.env.ANTHROPIC_1M_CONTEXT === "true") required.push("context-1m-2025-08-07")
               const merged = [...new Set([...required, ...existing])].join(",")
 
               headers.set("authorization", `Bearer ${auth.access}`)
@@ -274,9 +276,22 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 const cloned = response.clone()
                 const errorText = await cloned.text().catch(() => "")
                 const fs = await import("fs")
+                // Save full request body for debugging
+                const bodyPreview = typeof body === "string" ? body.slice(0, 1000) : ""
+                let bodyInfo = ""
+                if (typeof body === "string") {
+                  try {
+                    const p = JSON.parse(body)
+                    const sysBlocks = (p.system || []).length
+                    const msgCount = (p.messages || []).length
+                    const toolCount = (p.tools || []).length
+                    bodyInfo = `model=${p.model} max_tokens=${p.max_tokens} stream=${p.stream} thinking=${!!p.thinking} system_blocks=${sysBlocks} messages=${msgCount} tools=${toolCount} body_len=${body.length}`
+                  } catch {}
+                }
                 fs.appendFileSync("/tmp/opencode_api_errors.log",
                   `[${new Date().toISOString()}] HTTP ${response.status} model=${modelId}\n` +
                   `  headers: ${JSON.stringify(Object.fromEntries(headers.entries()))}\n` +
+                  `  request: ${bodyInfo}\n` +
                   `  response: ${errorText.slice(0, 500)}\n\n`)
                 log.error("API request failed", { status: response.status, model: modelId, body: errorText.slice(0, 200) })
               }
