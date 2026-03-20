@@ -9,7 +9,6 @@ const log = Log.create({ service: "plugin.anthropic" })
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
 const CLI_VERSION = "2.1.80"
-const TOKEN_USER_AGENT = "anthropic"
 const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
 
 async function authorize(mode: "max" | "console") {
@@ -44,11 +43,15 @@ async function exchange(code: string, verifier: string) {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": TOKEN_USER_AGENT,
+      "User-Agent": API_USER_AGENT,
     },
     body: body.toString(),
   })
-  if (!result.ok) return { type: "failed" as const }
+  if (!result.ok) {
+    const errorBody = await result.text().catch(() => "")
+    log.error("token exchange failed", { status: result.status, body: errorBody })
+    return { type: "failed" as const }
+  }
   const json = (await result.json()) as { refresh_token: string; access_token: string; expires_in: number }
   return {
     type: "success" as const,
@@ -95,7 +98,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   method: "POST",
                   headers: {
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": TOKEN_USER_AGENT,
+                    "User-Agent": API_USER_AGENT,
                   },
                   body: refreshBody.toString(),
                 })
