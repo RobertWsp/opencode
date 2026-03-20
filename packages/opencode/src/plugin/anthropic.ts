@@ -10,7 +10,7 @@ const log = Log.create({ service: "plugin.anthropic" })
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
 const CLI_VERSION = "2.1.80"
-const API_USER_AGENT = `claude-code/${CLI_VERSION}`
+const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
 const BILLING_SALT = "59cf53e54c78"
 
 function firstUserMessageText(messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>): string {
@@ -156,50 +156,19 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 auth.access = json.access_token
               }
 
-              const headers = new Headers()
-              if (input instanceof Request) {
-                input.headers.forEach((value, key) => headers.set(key, value))
-              }
-              if (init?.headers) {
-                if (init.headers instanceof Headers) {
-                  init.headers.forEach((value, key) => headers.set(key, value))
-                } else if (Array.isArray(init.headers)) {
-                  for (const [key, value] of init.headers) {
-                    if (typeof value !== "undefined") headers.set(key, String(value))
-                  }
-                } else {
-                  for (const [key, value] of Object.entries(init.headers)) {
-                    if (typeof value !== "undefined") headers.set(key, String(value))
-                  }
-                }
-              }
-
-              // Merge beta headers — preserve incoming, ensure required ones
-              const incoming = headers.get("anthropic-beta") || ""
-              const existing = incoming
-                .split(",")
-                .map((b) => b.trim())
-                .filter(Boolean)
-              const required = ["interleaved-thinking-2025-05-14", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"]
-              const merged = [...new Set([...required, ...existing])].join(",")
-
-              headers.set("authorization", `Bearer ${auth.access}`)
-              headers.set("anthropic-beta", merged)
-              headers.set("user-agent", API_USER_AGENT)
-              headers.set("x-app", "cli")
-              headers.delete("x-api-key")
-
+              // Parse body first to extract model for beta headers and inject billing
               let body = init?.body
+              let modelId = "unknown"
               if (body && typeof body === "string") {
                 try {
                   const parsed = JSON.parse(body)
+                  modelId = parsed.model ?? "unknown"
 
-                  // Generate billing header from first user message and inject into system prompt
+                  // Inject billing header as first system prompt block (required for Claude 4+ models)
                   const userText = firstUserMessageText(parsed.messages ?? [])
                   const billingText = generateBillingHeader(userText)
                   if (!parsed.system) parsed.system = []
                   if (!Array.isArray(parsed.system)) parsed.system = [{ type: "text", text: parsed.system }]
-                  // Remove any existing billing header blocks, then prepend
                   parsed.system = parsed.system.filter(
                     (item: { type: string; text?: string }) =>
                       !(item.type === "text" && item.text?.startsWith("x-anthropic-billing-header")),
@@ -207,18 +176,16 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   parsed.system.unshift({ type: "text", text: billingText })
 
                   // Sanitize system prompt — server blocks "OpenCode" string
-                  if (parsed.system && Array.isArray(parsed.system)) {
-                    parsed.system = parsed.system.map((item: { type: string; text?: string }) => {
-                      if (item.type === "text" && item.text && !item.text.startsWith("x-anthropic-billing-header"))
-                        return {
-                          ...item,
-                          text: item.text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude"),
-                        }
-                      return item
-                    })
-                  }
+                  parsed.system = parsed.system.map((item: { type: string; text?: string }) => {
+                    if (item.type === "text" && item.text && !item.text.startsWith("x-anthropic-billing-header"))
+                      return {
+                        ...item,
+                        text: item.text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude"),
+                      }
+                    return item
+                  })
 
-                  // Add prefix to tool definitions
+                  // Add mcp_ prefix to tool definitions
                   if (parsed.tools && Array.isArray(parsed.tools)) {
                     parsed.tools = parsed.tools.map((tool: { name?: string }) => ({
                       ...tool,
@@ -226,7 +193,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                     }))
                   }
 
-                  // Add prefix to tool_use blocks in messages
+                  // Add mcp_ prefix to tool_use blocks in messages
                   if (parsed.messages && Array.isArray(parsed.messages)) {
                     parsed.messages = parsed.messages.map(
                       (msg: { content?: Array<{ type: string; name?: string }> }) => {
@@ -247,6 +214,47 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   // ignore parse errors
                 }
               }
+
+              // Build headers — exact match with Claude Code 2.1.80 captured traffic
+              const headers = new Headers()
+              if (input instanceof Request) {
+                input.headers.forEach((value, key) => headers.set(key, value))
+              }
+              if (init?.headers) {
+                if (init.headers instanceof Headers) {
+                  init.headers.forEach((value, key) => headers.set(key, value))
+                } else if (Array.isArray(init.headers)) {
+                  for (const [key, value] of init.headers) {
+                    if (typeof value !== "undefined") headers.set(key, String(value))
+                  }
+                } else {
+                  for (const [key, value] of Object.entries(init.headers)) {
+                    if (typeof value !== "undefined") headers.set(key, String(value))
+                  }
+                }
+              }
+
+              // Beta headers — matched from Claude Code 2.1.80 network capture
+              const incoming = headers.get("anthropic-beta") || ""
+              const existing = incoming.split(",").map((b) => b.trim()).filter(Boolean)
+              const required = [
+                "oauth-2025-04-20",
+                "interleaved-thinking-2025-05-14",
+                "context-management-2025-06-27",
+                "prompt-caching-scope-2026-01-05",
+                "claude-code-20250219",
+              ]
+              // Sonnet/Opus need context-1m for 1M context window
+              const ml = modelId.toLowerCase()
+              if (ml.includes("sonnet") || ml.includes("opus")) required.push("context-1m-2025-08-07")
+              const merged = [...new Set([...required, ...existing])].join(",")
+
+              headers.set("authorization", `Bearer ${auth.access}`)
+              headers.set("anthropic-beta", merged)
+              headers.set("anthropic-dangerous-direct-browser-access", "true")
+              headers.set("user-agent", API_USER_AGENT)
+              headers.set("x-app", "cli")
+              headers.delete("x-api-key")
 
               // Append ?beta=true to /v1/messages requests
               let url = input
