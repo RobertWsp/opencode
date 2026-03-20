@@ -244,9 +244,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 "prompt-caching-scope-2026-01-05",
                 "claude-code-20250219",
               ]
-              // Sonnet/Opus need context-1m for 1M context window
-              const ml = modelId.toLowerCase()
-              if (ml.includes("sonnet") || ml.includes("opus")) required.push("context-1m-2025-08-07")
+              // Note: context-1m-2025-08-07 requires "Extra Usage" billing — omit to use 200k context
               const merged = [...new Set([...required, ...existing])].join(",")
 
               headers.set("authorization", `Bearer ${auth.access}`)
@@ -270,6 +268,18 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
               }
 
               const response = await fetch(url, { ...init, body, headers })
+
+              // Log non-200 responses for debugging
+              if (!response.ok) {
+                const cloned = response.clone()
+                const errorText = await cloned.text().catch(() => "")
+                const fs = await import("fs")
+                fs.appendFileSync("/tmp/opencode_api_errors.log",
+                  `[${new Date().toISOString()}] HTTP ${response.status} model=${modelId}\n` +
+                  `  headers: ${JSON.stringify(Object.fromEntries(headers.entries()))}\n` +
+                  `  response: ${errorText.slice(0, 500)}\n\n`)
+                log.error("API request failed", { status: response.status, model: modelId, body: errorText.slice(0, 200) })
+              }
 
               // Transform streaming response to strip tool prefix back
               if (response.body) {
