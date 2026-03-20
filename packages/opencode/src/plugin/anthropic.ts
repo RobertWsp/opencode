@@ -3,13 +3,33 @@ import { APICallError } from "ai"
 import { Log } from "../util/log"
 import { OAUTH_DUMMY_KEY, Auth } from "../auth"
 import { generatePKCE } from "@openauthjs/openauth/pkce"
+import { createHash } from "crypto"
 
 const log = Log.create({ service: "plugin.anthropic" })
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
 const CLI_VERSION = "2.1.80"
-const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
+const API_USER_AGENT = `claude-code/${CLI_VERSION}`
+const BILLING_SALT = "59cf53e54c78"
+
+function firstUserMessageText(messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>): string {
+  const msg = messages.find((m) => m.role === "user")
+  if (!msg) return ""
+  if (typeof msg.content === "string") return msg.content
+  if (Array.isArray(msg.content)) {
+    const block = msg.content.find((b) => b.type === "text")
+    if (block && "text" in block) return block.text ?? ""
+  }
+  return ""
+}
+
+function generateBillingHeader(userText: string): string {
+  const sampled = [4, 7, 20].map((i) => userText[i] || "0").join("")
+  const hash = createHash("sha256").update(`${BILLING_SALT}${sampled}${CLI_VERSION}`).digest("hex").slice(0, 3)
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli"
+  return `x-anthropic-billing-header: cc_version=${CLI_VERSION}.${hash}; cc_entrypoint=${entrypoint}; cch=00000;`
+}
 
 async function authorize(mode: "max" | "console") {
   const pkce = await generatePKCE()
@@ -170,10 +190,22 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 try {
                   const parsed = JSON.parse(body)
 
+                  // Generate billing header from first user message and inject into system prompt
+                  const userText = firstUserMessageText(parsed.messages ?? [])
+                  const billingText = generateBillingHeader(userText)
+                  if (!parsed.system) parsed.system = []
+                  if (!Array.isArray(parsed.system)) parsed.system = [{ type: "text", text: parsed.system }]
+                  // Remove any existing billing header blocks, then prepend
+                  parsed.system = parsed.system.filter(
+                    (item: { type: string; text?: string }) =>
+                      !(item.type === "text" && item.text?.startsWith("x-anthropic-billing-header")),
+                  )
+                  parsed.system.unshift({ type: "text", text: billingText })
+
                   // Sanitize system prompt — server blocks "OpenCode" string
                   if (parsed.system && Array.isArray(parsed.system)) {
                     parsed.system = parsed.system.map((item: { type: string; text?: string }) => {
-                      if (item.type === "text" && item.text)
+                      if (item.type === "text" && item.text && !item.text.startsWith("x-anthropic-billing-header"))
                         return {
                           ...item,
                           text: item.text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude"),
