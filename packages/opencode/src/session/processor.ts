@@ -387,6 +387,20 @@ export namespace SessionProcessor {
               })
             } else {
               if (MessageV2.APIError.isInstance(error)) {
+                // "long context" 429 means the request exceeds the OAuth context limit —
+                // treat as context overflow to trigger compaction instead of cooldown
+                if (
+                  error.data.statusCode === 429 &&
+                  typeof error.data.responseBody === "string" &&
+                  error.data.responseBody.includes("long context")
+                ) {
+                  log.info("long context rejection — triggering compaction", {
+                    sessionID: input.sessionID,
+                  })
+                  needsCompaction = true
+                  Bus.publish(Session.Event.Error, { sessionID: input.sessionID, error })
+                  break
+                }
                 const pool = await Provider.getPool(input.model.providerID)
                 if (pool) {
                   const faulted = usedAccount ?? pool.stats().activeIndex
