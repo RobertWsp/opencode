@@ -153,7 +153,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 .split(",")
                 .map((b) => b.trim())
                 .filter(Boolean)
-              const required = ["interleaved-thinking-2025-04-14", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"]
+              const required = ["interleaved-thinking-2025-05-14", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"]
               const merged = [...new Set([...required, ...existing])].join(",")
 
               headers.set("authorization", `Bearer ${auth.access}`)
