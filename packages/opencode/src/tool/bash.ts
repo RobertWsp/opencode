@@ -17,11 +17,21 @@ import { Shell } from "@/shell/shell"
 import { BashArity } from "@/permission/arity"
 import { Truncate } from "./truncation"
 import { Plugin } from "@/plugin"
+import { BashSafety } from "./bash-safety"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 
 export const log = Log.create({ service: "bash-tool" })
+
+export class BashSafetyError extends Error {
+  public readonly result: BashSafety.Result
+  constructor(result: BashSafety.Result) {
+    super(`BLOCKED: ${result.reason}\n\nSuggested alternative: ${result.alternative}`)
+    this.name = "BashSafetyError"
+    this.result = result
+  }
+}
 
 const resolveWasm = (asset: string) => {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
@@ -85,6 +95,21 @@ export const BashTool = Tool.define("bash", async () => {
       if (!tree) {
         throw new Error("Failed to parse command")
       }
+      // Safety classification — check each command before execution
+      let safetyDanger: BashSafety.Result | undefined
+      for (const node of tree.rootNode.descendantsOfType("command")) {
+        if (!node) continue
+        const text = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
+        const tokens = BashSafety.tokenize(text)
+        const safety = BashSafety.classify(tokens, text)
+        if (safety.level === "blocked") throw new BashSafetyError(safety)
+        if (safety.level === "danger" && !safetyDanger) safetyDanger = safety
+      }
+      // Also check full raw command for cross-command patterns (pipes, indirection)
+      const fullSafety = BashSafety.classify(BashSafety.tokenize(params.command), params.command)
+      if (fullSafety.level === "blocked") throw new BashSafetyError(fullSafety)
+      if (fullSafety.level === "danger" && !safetyDanger) safetyDanger = fullSafety
+
       const directories = new Set<string>()
       if (!Instance.containsPath(cwd)) directories.add(cwd)
       const patterns = new Set<string>()
@@ -160,7 +185,9 @@ export const BashTool = Tool.define("bash", async () => {
           permission: "bash",
           patterns: Array.from(patterns),
           always: Array.from(always),
-          metadata: {},
+          metadata: safetyDanger
+            ? { safety: true, reason: safetyDanger.reason, alternative: safetyDanger.alternative }
+            : {},
         })
       }
 
