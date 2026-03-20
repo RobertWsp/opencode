@@ -8,6 +8,9 @@ const log = Log.create({ service: "plugin.anthropic" })
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
+const CLI_VERSION = "2.1.80"
+const TOKEN_USER_AGENT = "anthropic"
+const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
 
 async function authorize(mode: "max" | "console") {
   const pkce = await generatePKCE()
@@ -24,18 +27,26 @@ async function authorize(mode: "max" | "console") {
 }
 
 async function exchange(code: string, verifier: string) {
-  const splits = code.split("#")
+  const rawCode = code.trim()
+  const hashIdx = rawCode.indexOf("#")
+  const cleanCode = hashIdx >= 0 ? rawCode.slice(0, hashIdx) : rawCode
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: cleanCode,
+    code_verifier: verifier,
+    client_id: CLIENT_ID,
+    redirect_uri: "https://console.anthropic.com/oauth/code/callback",
+    state: verifier,
+  })
+
   const result = await fetch("https://console.anthropic.com/v1/oauth/token", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code: splits[0],
-      state: splits[1],
-      grant_type: "authorization_code",
-      client_id: CLIENT_ID,
-      redirect_uri: "https://console.anthropic.com/oauth/code/callback",
-      code_verifier: verifier,
-    }),
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": TOKEN_USER_AGENT,
+    },
+    body: body.toString(),
   })
   if (!result.ok) return { type: "failed" as const }
   const json = (await result.json()) as { refresh_token: string; access_token: string; expires_in: number }
@@ -75,14 +86,18 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
 
               if (!auth.access || auth.expires - 60_000 < Date.now()) {
                 log.info("refreshing anthropic access token", { authKey })
+                const refreshBody = new URLSearchParams({
+                  grant_type: "refresh_token",
+                  refresh_token: auth.refresh,
+                  client_id: CLIENT_ID,
+                })
                 const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
                   method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    grant_type: "refresh_token",
-                    refresh_token: auth.refresh,
-                    client_id: CLIENT_ID,
-                  }),
+                  headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": TOKEN_USER_AGENT,
+                  },
+                  body: refreshBody.toString(),
                 })
                 if (!response.ok) {
                   const body = await response.text().catch(() => "")
@@ -138,12 +153,13 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 .split(",")
                 .map((b) => b.trim())
                 .filter(Boolean)
-              const required = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"]
+              const required = ["interleaved-thinking-2025-04-14", "fine-grained-tool-streaming-2025-05-14", "oauth-2025-04-20"]
               const merged = [...new Set([...required, ...existing])].join(",")
 
               headers.set("authorization", `Bearer ${auth.access}`)
               headers.set("anthropic-beta", merged)
-              headers.set("user-agent", "claude-cli/2.1.2 (external, cli)")
+              headers.set("user-agent", API_USER_AGENT)
+              headers.set("x-app", "cli")
               headers.delete("x-api-key")
 
               let body = init?.body
