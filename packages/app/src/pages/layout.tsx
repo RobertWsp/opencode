@@ -2202,39 +2202,77 @@ export default function Layout(props: ParentProps) {
             aim.reset()
             if (!sidebarHovering()) return
 
-            if (navLeave.current !== undefined) clearTimeout(navLeave.current)
-            navLeave.current = window.setTimeout(() => {
-              navLeave.current = undefined
-              setHoverProject(undefined)
-              setState("hoverSession", undefined)
-            }, 300)
-          }}
-        >
-          <div class="@container w-full h-full contain-strict">
-            <SidebarContent
-              opened={() => layout.sidebar.opened()}
-              aimMove={aim.move}
-              projects={() => layout.projects.list()}
-              renderProject={(project) => (
-                <SortableProject ctx={projectSidebarCtx} project={project} sortNow={sortNow} />
-              )}
-              handleDragStart={handleDragStart}
-              handleDragEnd={handleDragEnd}
-              handleDragOver={handleDragOver}
-              openProjectLabel={language.t("command.project.open")}
-              openProjectKeybind={() => command.keybind("project.open")}
-              onOpenProject={chooseProject}
-              renderProjectOverlay={() => (
-                <ProjectDragOverlay projects={() => layout.projects.list()} activeProject={() => store.activeProject} />
-              )}
-              settingsLabel={() => language.t("sidebar.settings")}
-              settingsKeybind={() => command.keybind("settings.open")}
-              onOpenSettings={openSettings}
-              helpLabel={() => language.t("sidebar.help")}
-              onOpenHelp={() => platform.openLink("https://opencode.ai/desktop-feedback")}
-              renderPanel={() => (
-                <Show when={currentProject()} keyed>
-                  {(project) => <SidebarPanel project={project} />}
+                arm()
+              }}
+            >
+              <div class="@container w-full h-full contain-strict">{sidebarContent()}</div>
+              <Show when={layout.sidebar.opened()}>
+                <div onPointerDown={() => setState("sizing", true)}>
+                  <ResizeHandle
+                    direction="horizontal"
+                    size={layout.sidebar.width()}
+                    min={244}
+                    max={typeof window === "undefined" ? 1000 : window.innerWidth * 0.3 + 64}
+                    onResize={(w) => {
+                      setState("sizing", true)
+                      if (sizet !== undefined) clearTimeout(sizet)
+                      sizet = window.setTimeout(() => setState("sizing", false), 120)
+                      layout.sidebar.resize(w)
+                    }}
+                  />
+                </div>
+              </Show>
+            </nav>
+
+            <div
+              class="hidden xl:block pointer-events-none absolute top-0 right-0 z-0 border-t border-border-weaker-base"
+              style={{ left: "calc(4rem + 12px)" }}
+            />
+
+            <div class="xl:hidden">
+              <div
+                classList={{
+                  "fixed inset-x-0 top-10 bottom-0 z-40 transition-opacity duration-200": true,
+                  "opacity-100 pointer-events-auto": layout.mobileSidebar.opened(),
+                  "opacity-0 pointer-events-none": !layout.mobileSidebar.opened(),
+                }}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) layout.mobileSidebar.hide()
+                }}
+              />
+              <nav
+                aria-label={language.t("sidebar.nav.projectsAndSessions")}
+                data-component="sidebar-nav-mobile"
+                classList={{
+                  "@container fixed top-10 bottom-0 left-0 z-50 w-full max-w-[400px] overflow-hidden border-r border-border-weaker-base bg-background-base transition-transform duration-200 ease-out": true,
+                  "translate-x-0": layout.mobileSidebar.opened(),
+                  "-translate-x-full": !layout.mobileSidebar.opened(),
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {sidebarContent(true)}
+              </nav>
+            </div>
+
+            <div
+              classList={{
+                "absolute inset-0": true,
+                "xl:inset-y-0 xl:right-0 xl:left-[var(--main-left)]": true,
+                "z-20": true,
+                "transition-[left] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[left] motion-reduce:transition-none":
+                  !state.sizing,
+              }}
+              style={{
+                "--main-left": layout.sidebar.opened() ? `${Math.max(layout.sidebar.width(), 244)}px` : "4rem",
+              }}
+            >
+              <main
+                classList={{
+                  "size-full overflow-x-hidden flex flex-col items-start contain-strict border-t border-border-weak-base bg-background-base xl:border-l xl:rounded-tl-[12px]": true,
+                }}
+              >
+                <Show when={!autoselecting.loading} fallback={<div class="size-full" />}>
+                  {props.children}
                 </Show>
               </main>
             </div>
