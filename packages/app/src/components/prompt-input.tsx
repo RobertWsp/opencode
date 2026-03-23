@@ -973,7 +973,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return true
   }
 
-  const { addImageAttachment, removeImageAttachment, handlePaste } = createPromptAttachments({
+  const { addAttachments, removeAttachment, handlePaste } = createPromptAttachments({
     editor: () => editorRef,
     isFocused,
     isDialogActive: () => !!dialog.active,
@@ -1303,8 +1303,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
               accept={ACCEPTED_FILE_TYPES.join(",")}
               class="hidden"
               onChange={(e) => {
-                const file = e.currentTarget.files?.[0]
-                if (file) addImageAttachment(file)
+                const list = e.currentTarget.files
+                if (list) void addAttachments(Array.from(list))
                 e.currentTarget.value = ""
               }}
             />
