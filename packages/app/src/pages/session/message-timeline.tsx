@@ -1,4 +1,4 @@
-import { For, createEffect, createMemo, on, onCleanup, Show, Index, type JSX } from "solid-js"
+import { For, createEffect, createMemo, on, onCleanup, Show, Index, type JSX, createSignal } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { useNavigate, useParams } from "@solidjs/router"
 import { Button } from "@opencode-ai/ui/button"
@@ -23,6 +23,7 @@ import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
 import { messageAgentColor } from "@/utils/agent"
 import { parseCommentNote, readCommentMetadata } from "@/utils/comment-note"
+import { makeTimer } from "@solid-primitives/timer"
 
 type MessageComment = {
   path: string
@@ -239,38 +240,21 @@ export function MessageTimeline(props: {
   const working = createMemo(() => !!pending() || sessionStatus().type !== "idle")
   const tint = createMemo(() => messageAgentColor(sessionMessages(), sync.data.agent))
 
-  const [slot, setSlot] = createStore({
-    open: false,
-    show: false,
-    fade: false,
+  const [timeoutDone, setTimeoutDone] = createSignal(true)
+
+  const workingStatus = createMemo<"hidden" | "showing" | "hiding">((prev) => {
+    if (working()) return "showing"
+    if (prev === "showing" || !timeoutDone()) return "hiding"
+    return "hidden"
   })
 
-  let f: number | undefined
-  const clear = () => {
-    if (f !== undefined) window.clearTimeout(f)
-    f = undefined
-  }
+  createEffect(() => {
+    if (workingStatus() !== "hiding") return
 
-  onCleanup(clear)
-  createEffect(
-    on(
-      working,
-      (on, prev) => {
-        clear()
-        if (on) {
-          setSlot({ open: true, show: true, fade: false })
-          return
-        }
-        if (prev) {
-          setSlot({ open: false, show: true, fade: true })
-          f = window.setTimeout(() => setSlot({ show: false, fade: false }), 260)
-          return
-        }
-        setSlot({ open: false, show: false, fade: false })
-      },
-      { defer: true },
-    ),
-  )
+    setTimeoutDone(false)
+    makeTimer(() => setTimeoutDone(true), 260, setTimeout)
+  })
+
   const activeMessageID = createMemo(() => {
     const parentID = pending()?.parentID
     if (parentID) {
@@ -609,13 +593,19 @@ export function MessageTimeline(props: {
                         aria-label={language.t("common.goBack")}
                       />
                     </Show>
-                    <Show when={titleValue() || title.editing}>
-                      <Show
-                        when={title.editing}
-                        fallback={
-                          <h1
-                            class="text-14-medium text-text-strong truncate grow-1 min-w-0 pl-2"
-                            onDblClick={openTitleEditor}
+                    <div class="flex items-center min-w-0 grow-1">
+                      <div
+                        class="shrink-0 flex items-center justify-center overflow-hidden transition-[width,margin] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                        style={{
+                          width: working() ? "16px" : "0px",
+                          "margin-right": working() ? "8px" : "0px",
+                        }}
+                        aria-hidden="true"
+                      >
+                        <Show when={workingStatus() !== "hidden"}>
+                          <div
+                            class="transition-opacity duration-200 ease-out"
+                            classList={{ "opacity-0": workingStatus() === "hiding" }}
                           >
                             <Spinner class="size-4" style={{ color: tint() ?? "var(--icon-interactive-base)" }} />
                           </div>
@@ -713,7 +703,6 @@ export function MessageTimeline(props: {
                 </div>
               </div>
             </Show>
-
             <div
               role="log"
               class="flex flex-col gap-12 items-start justify-start pb-16 transition-[margin]"
