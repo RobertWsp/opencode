@@ -385,49 +385,42 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     if (sync.data.config.share === "disabled") return []
     return [
       sessionCommand({
-        id: "session.share",
-        title: info()?.share?.url ? language.t("session.share.copy.copyLink") : language.t("command.session.share"),
-        description: info()?.share?.url
-          ? language.t("toast.session.share.success.description")
-          : language.t("command.session.share.description"),
-        slash: "share",
-        disabled: !params.id,
-        onSelect: async () => {
-          if (!params.id) return
-
-          const write = (value: string) => {
-            const body = typeof document === "undefined" ? undefined : document.body
-            if (body) {
-              const textarea = document.createElement("textarea")
-              textarea.value = value
-              textarea.setAttribute("readonly", "")
-              textarea.style.position = "fixed"
-              textarea.style.opacity = "0"
-              textarea.style.pointerEvents = "none"
-              body.appendChild(textarea)
-              textarea.select()
-              const copied = document.execCommand("copy")
-              body.removeChild(textarea)
-              if (copied) return Promise.resolve(true)
-            }
-
-            const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard
-            if (!clipboard?.writeText) return Promise.resolve(false)
-            return clipboard.writeText(value).then(
-              () => true,
-              () => false,
-            )
-          }
-
-          const copy = async (url: string, existing: boolean) => {
-            const ok = await write(url)
-            if (!ok) {
-              showToast({
-                title: language.t("toast.session.share.copyFailed.title"),
-                variant: "error",
-              })
-              return
-            }
+        id: "session.new",
+        title: language.t("command.session.new"),
+        keybind: "mod+shift+s",
+        slash: "new",
+        onSelect: () => navigate(`/${params.dir}/session`),
+      }),
+      fileCommand({
+        id: "file.open",
+        title: language.t("command.file.open"),
+        description: language.t("palette.search.placeholder"),
+        keybind: "mod+k,mod+p",
+        slash: "open",
+        onSelect: () => dialog.show(() => <DialogSelectFile onOpenFile={showAllFiles} />),
+      }),
+      fileCommand({
+        id: "tab.close",
+        title: language.t("command.tab.close"),
+        keybind: "mod+w",
+        disabled: !closableTab(),
+        onSelect: () => {
+          const tab = closableTab()
+          if (!tab) return
+          tabs().close(tab)
+        },
+      }),
+      contextCommand({
+        id: "context.addSelection",
+        title: language.t("command.context.addSelection"),
+        description: language.t("command.context.addSelection.description"),
+        keybind: "mod+shift+l",
+        disabled: !canAddSelectionContext(),
+        onSelect: () => {
+          const tab = activeFileTab()
+          if (!tab) return
+          const path = file.pathFromTab(tab)
+          if (!path) return
 
             showToast({
               title: existing

@@ -29,9 +29,141 @@ export async function defocus(page: Page) {
     .catch(() => undefined)
 }
 
-export async function openPalette(page: Page) {
+async function terminalID(term: Locator) {
+  const id = await term.getAttribute(terminalAttr)
+  if (id) return id
+  throw new Error(`Active terminal missing ${terminalAttr}`)
+}
+
+export async function terminalConnects(page: Page, input?: { term?: Locator }) {
+  const term = input?.term ?? page.locator(terminalSelector).first()
+  const id = await terminalID(term)
+  return page.evaluate((id) => {
+    return (window as E2EWindow).__opencode_e2e?.terminal?.terminals?.[id]?.connects ?? 0
+  }, id)
+}
+
+export async function disconnectTerminal(page: Page, input?: { term?: Locator }) {
+  const term = input?.term ?? page.locator(terminalSelector).first()
+  const id = await terminalID(term)
+  await page.evaluate((id) => {
+    ;(window as E2EWindow).__opencode_e2e?.terminal?.controls?.[id]?.disconnect?.()
+  }, id)
+}
+
+async function terminalReady(page: Page, term?: Locator) {
+  const next = term ?? page.locator(terminalSelector).first()
+  const id = await terminalID(next)
+  return page.evaluate((id) => {
+    const state = (window as E2EWindow).__opencode_e2e?.terminal?.terminals?.[id]
+    return !!state?.connected && (state.settled ?? 0) > 0
+  }, id)
+}
+
+async function terminalFocusIdle(page: Page, term?: Locator) {
+  const next = term ?? page.locator(terminalSelector).first()
+  const id = await terminalID(next)
+  return page.evaluate((id) => {
+    const state = (window as E2EWindow).__opencode_e2e?.terminal?.terminals?.[id]
+    return (state?.focusing ?? 0) === 0
+  }, id)
+}
+
+async function terminalHas(page: Page, input: { term?: Locator; token: string }) {
+  const next = input.term ?? page.locator(terminalSelector).first()
+  const id = await terminalID(next)
+  return page.evaluate(
+    (input) => {
+      const state = (window as E2EWindow).__opencode_e2e?.terminal?.terminals?.[input.id]
+      return state?.rendered.includes(input.token) ?? false
+    },
+    { id, token: input.token },
+  )
+}
+
+async function promptSlashActive(page: Page, id: string) {
+  return page.evaluate((id) => {
+    const state = (window as E2EWindow).__opencode_e2e?.prompt?.current
+    if (state?.popover !== "slash") return false
+    if (!state.slash.ids.includes(id)) return false
+    return state.slash.active === id
+  }, id)
+}
+
+async function promptSlashSelects(page: Page) {
+  return page.evaluate(() => {
+    return (window as E2EWindow).__opencode_e2e?.prompt?.current?.selects ?? 0
+  })
+}
+
+async function promptSlashSelected(page: Page, input: { id: string; count: number }) {
+  return page.evaluate((input) => {
+    const state = (window as E2EWindow).__opencode_e2e?.prompt?.current
+    if (!state) return false
+    return state.selected === input.id && state.selects >= input.count
+  }, input)
+}
+
+export async function waitTerminalReady(page: Page, input?: { term?: Locator; timeout?: number }) {
+  const term = input?.term ?? page.locator(terminalSelector).first()
+  const timeout = input?.timeout ?? 10_000
+  await expect(term).toBeVisible()
+  await expect(term.locator("textarea")).toHaveCount(1)
+  await expect.poll(() => terminalReady(page, term), { timeout }).toBe(true)
+}
+
+export async function waitTerminalFocusIdle(page: Page, input?: { term?: Locator; timeout?: number }) {
+  const term = input?.term ?? page.locator(terminalSelector).first()
+  const timeout = input?.timeout ?? 10_000
+  await waitTerminalReady(page, { term, timeout })
+  await expect.poll(() => terminalFocusIdle(page, term), { timeout }).toBe(true)
+}
+
+export async function showPromptSlash(
+  page: Page,
+  input: { id: string; text: string; prompt?: Locator; timeout?: number },
+) {
+  const prompt = input.prompt ?? page.locator(promptSelector)
+  const timeout = input.timeout ?? 10_000
+  await expect
+    .poll(
+      async () => {
+        await prompt.click().catch(() => false)
+        await prompt.fill(input.text).catch(() => false)
+        return promptSlashActive(page, input.id).catch(() => false)
+      },
+      { timeout },
+    )
+    .toBe(true)
+}
+
+export async function runPromptSlash(
+  page: Page,
+  input: { id: string; text: string; prompt?: Locator; timeout?: number },
+) {
+  const prompt = input.prompt ?? page.locator(promptSelector)
+  const timeout = input.timeout ?? 10_000
+  const count = await promptSlashSelects(page)
+  await showPromptSlash(page, input)
+  await prompt.press("Enter")
+  await expect.poll(() => promptSlashSelected(page, { id: input.id, count: count + 1 }), { timeout }).toBe(true)
+}
+
+export async function runTerminal(page: Page, input: { cmd: string; token: string; term?: Locator; timeout?: number }) {
+  const term = input.term ?? page.locator(terminalSelector).first()
+  const timeout = input.timeout ?? 10_000
+  await waitTerminalReady(page, { term, timeout })
+  const textarea = term.locator("textarea")
+  await term.click()
+  await expect(textarea).toBeFocused()
+  await page.keyboard.type(input.cmd)
+  await page.keyboard.press("Enter")
+  await expect.poll(() => terminalHas(page, { term, token: input.token }), { timeout }).toBe(true)
+}
+
+export async function openPalette(page: Page, key = "K") {
   await defocus(page)
-  await page.keyboard.press(`${modKey}+P`)
+  await page.keyboard.press(`${modKey}+${key}`)
 
   const dialog = page.getByRole("dialog")
   await expect(dialog).toBeVisible()
