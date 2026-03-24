@@ -109,7 +109,11 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
 
     createEffect(() => {
       if (typeof document === "undefined") return
-      document.documentElement.style.setProperty("--font-family-mono", monoFontFamily(store.appearance?.font))
+      const id = store.appearance?.font ?? defaultSettings.appearance.font
+      if (id !== defaultSettings.appearance.font) {
+        void loadFont().then((x) => x.ensureMonoFont(id))
+      }
+      document.documentElement.style.setProperty("--font-family-mono", monoFontFamily(id))
     })
 
     return {
