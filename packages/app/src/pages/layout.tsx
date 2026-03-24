@@ -1706,6 +1706,9 @@ export default function Layout(props: ParentProps) {
     document.documentElement.style.setProperty("--dialog-left-margin", `${sidebarWidth}px`)
   })
 
+  const side = createMemo(() => Math.max(layout.sidebar.width(), 244))
+  const panel = createMemo(() => Math.max(side() - 64, 0))
+
   const loadedSessionDirs = new Set<string>()
 
   createEffect(
@@ -1970,6 +1973,10 @@ export default function Layout(props: ParentProps) {
           "bg-background-base": merged() || hover(),
           "bg-background-stronger": !merged() && !hover(),
           "flex-1 min-w-0": panelProps.mobile,
+          "max-w-full overflow-hidden": panelProps.mobile,
+        }}
+        style={{
+          width: panelProps.mobile ? undefined : `${panel()}px`,
         }}
         style={{ width: panelProps.mobile ? undefined : `${Math.max(layout.sidebar.width() - 64, 0)}px` }}
       >
@@ -2014,9 +2021,11 @@ export default function Layout(props: ParentProps) {
                     variant="ghost"
                     data-action="project-menu"
                     data-project={slug()}
-                    class="shrink-0 size-6 rounded-md data-[expanded]:bg-surface-base-active"
+                    class="shrink-0 size-6 rounded-md transition-opacity data-[expanded]:bg-surface-base-active"
                     classList={{
-                      "opacity-0 group-hover/project:opacity-100 data-[expanded]:opacity-100": !panelProps.mobile,
+                      "opacity-100": panelProps.mobile || merged(),
+                      "opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100 data-[expanded]:opacity-100":
+                        !panelProps.mobile && !merged(),
                     }}
                     aria-label={language.t("common.moreOptions")}
                   />
@@ -2230,48 +2239,54 @@ export default function Layout(props: ParentProps) {
   return (
     <div class="relative bg-background-base flex-1 min-h-0 flex flex-col select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text">
       <Titlebar />
-      <div class="flex-1 min-h-0 flex">
-        <nav
-          aria-label={language.t("sidebar.nav.projectsAndSessions")}
-          data-component="sidebar-nav-desktop"
-          classList={{
-            "hidden xl:block": true,
-            "relative shrink-0": true,
-          }}
-          style={{ width: layout.sidebar.opened() ? `${Math.max(layout.sidebar.width(), 244)}px` : "64px" }}
-          ref={(el) => {
-            setState("nav", el)
-          }}
-          onMouseEnter={() => {
-            if (navLeave.current === undefined) return
-            clearTimeout(navLeave.current)
-            navLeave.current = undefined
-          }}
-          onMouseLeave={() => {
-            aim.reset()
-            if (!sidebarHovering()) return
+      <div class="flex-1 min-h-0 min-w-0 flex">
+        <div class="flex-1 min-h-0 relative">
+          <div class="size-full relative overflow-x-hidden">
+            <nav
+              aria-label={language.t("sidebar.nav.projectsAndSessions")}
+              data-component="sidebar-nav-desktop"
+              classList={{
+                "hidden xl:block": true,
+                "absolute inset-y-0 left-0": true,
+                "z-10": true,
+              }}
+              style={{ width: `${side()}px` }}
+              ref={(el) => {
+                setState("nav", el)
+              }}
+              onMouseEnter={() => {
+                disarm()
+              }}
+              onMouseLeave={() => {
+                aim.reset()
+                if (!sidebarHovering()) return
 
                 arm()
               }}
             >
               <div class="@container w-full h-full contain-strict">{sidebarContent()}</div>
-              <Show when={layout.sidebar.opened()}>
-                <div onPointerDown={() => setState("sizing", true)}>
-                  <ResizeHandle
-                    direction="horizontal"
-                    size={layout.sidebar.width()}
-                    min={244}
-                    max={typeof window === "undefined" ? 1000 : window.innerWidth * 0.3 + 64}
-                    onResize={(w) => {
-                      setState("sizing", true)
-                      if (sizet !== undefined) clearTimeout(sizet)
-                      sizet = window.setTimeout(() => setState("sizing", false), 120)
-                      layout.sidebar.resize(w)
-                    }}
-                  />
-                </div>
-              </Show>
             </nav>
+
+            <Show when={layout.sidebar.opened()}>
+              <div
+                class="hidden xl:block absolute inset-y-0 z-30 w-0 overflow-visible"
+                style={{ left: `${side()}px` }}
+                onPointerDown={() => setState("sizing", true)}
+              >
+                <ResizeHandle
+                  direction="horizontal"
+                  size={layout.sidebar.width()}
+                  min={244}
+                  max={typeof window === "undefined" ? 1000 : window.innerWidth * 0.3 + 64}
+                  onResize={(w) => {
+                    setState("sizing", true)
+                    if (sizet !== undefined) clearTimeout(sizet)
+                    sizet = window.setTimeout(() => setState("sizing", false), 120)
+                    layout.sidebar.resize(w)
+                  }}
+                />
+              </div>
+            </Show>
 
             <div
               class="hidden xl:block pointer-events-none absolute top-0 right-0 z-0 border-t border-border-weaker-base"
@@ -2312,7 +2327,7 @@ export default function Layout(props: ParentProps) {
                   !state.sizing,
               }}
               style={{
-                "--main-left": layout.sidebar.opened() ? `${Math.max(layout.sidebar.width(), 244)}px` : "4rem",
+                "--main-left": layout.sidebar.opened() ? `${side()}px` : "4rem",
               }}
             >
               <main
@@ -2359,7 +2374,7 @@ export default function Layout(props: ParentProps) {
                 "duration-180 ease-out": peeked() && !layout.sidebar.opened(),
                 "duration-120 ease-in": !peeked() || layout.sidebar.opened(),
               }}
-              style={{ left: `calc(4rem + ${Math.max(Math.max(layout.sidebar.width(), 244) - 64, 0)}px)` }}
+              style={{ left: `calc(4rem + ${panel()}px)` }}
             >
               <div class="h-full w-px" style={{ "box-shadow": "var(--shadow-sidebar-overlay)" }} />
             </div>
