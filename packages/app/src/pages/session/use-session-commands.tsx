@@ -454,11 +454,90 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
         },
       }),
       sessionCommand({
-        id: "session.unshare",
-        title: language.t("command.session.unshare"),
-        description: language.t("command.session.unshare.description"),
-        slash: "unshare",
-        disabled: !params.id || !info()?.share?.url,
+        id: "message.previous",
+        title: language.t("command.message.previous"),
+        description: language.t("command.message.previous.description"),
+        keybind: "mod+alt+[",
+        disabled: !params.id,
+        onSelect: () => navigateMessageByOffset(-1),
+      }),
+      sessionCommand({
+        id: "message.next",
+        title: language.t("command.message.next"),
+        description: language.t("command.message.next.description"),
+        keybind: "mod+alt+]",
+        disabled: !params.id,
+        onSelect: () => navigateMessageByOffset(1),
+      }),
+      modelCommand({
+        id: "model.choose",
+        title: language.t("command.model.choose"),
+        description: language.t("command.model.choose.description"),
+        keybind: "mod+'",
+        slash: "model",
+        onSelect: () => dialog.show(() => <DialogSelectModel model={local.model} />),
+      }),
+      mcpCommand({
+        id: "mcp.toggle",
+        title: language.t("command.mcp.toggle"),
+        description: language.t("command.mcp.toggle.description"),
+        keybind: "mod+;",
+        slash: "mcp",
+        onSelect: () => dialog.show(() => <DialogSelectMcp />),
+      }),
+      agentCommand({
+        id: "agent.cycle",
+        title: language.t("command.agent.cycle"),
+        description: language.t("command.agent.cycle.description"),
+        keybind: "mod+.",
+        slash: "agent",
+        onSelect: () => local.agent.move(1),
+      }),
+      agentCommand({
+        id: "agent.cycle.reverse",
+        title: language.t("command.agent.cycle.reverse"),
+        description: language.t("command.agent.cycle.reverse.description"),
+        keybind: "shift+mod+.",
+        onSelect: () => local.agent.move(-1),
+      }),
+      modelCommand({
+        id: "model.variant.cycle",
+        title: language.t("command.model.variant.cycle"),
+        description: language.t("command.model.variant.cycle.description"),
+        keybind: "shift+mod+d",
+        onSelect: () => local.model.variant.cycle(),
+      }),
+      permissionsCommand({
+        id: "permissions.autoaccept",
+        title: isAutoAcceptActive()
+          ? language.t("command.permissions.autoaccept.disable")
+          : language.t("command.permissions.autoaccept.enable"),
+        keybind: "mod+shift+a",
+        disabled: false,
+        onSelect: () => {
+          const sessionID = params.id
+          if (sessionID) permission.toggleAutoAccept(sessionID, sdk.directory)
+          else permission.toggleAutoAcceptDirectory(sdk.directory)
+
+          const active = sessionID
+            ? permission.isAutoAccepting(sessionID, sdk.directory)
+            : permission.isAutoAcceptingDirectory(sdk.directory)
+          showToast({
+            title: active
+              ? language.t("toast.permissions.autoaccept.on.title")
+              : language.t("toast.permissions.autoaccept.off.title"),
+            description: active
+              ? language.t("toast.permissions.autoaccept.on.description")
+              : language.t("toast.permissions.autoaccept.off.description"),
+          })
+        },
+      }),
+      sessionCommand({
+        id: "session.undo",
+        title: language.t("command.session.undo"),
+        description: language.t("command.session.undo.description"),
+        slash: "undo",
+        disabled: !params.id || visibleUserMessages().length === 0,
         onSelect: async () => {
           if (!params.id) return
           await sdk.client.session
