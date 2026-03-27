@@ -22,7 +22,8 @@ function iconPath() {
 
 export function setDockIcon() {
   if (process.platform !== "darwin") return
-  app.dock?.setIcon(nativeImage.createFromPath(join(iconsDir(), "128x128@2x.png")))
+  const icon = nativeImage.createFromPath(join(iconsDir(), "dock.png"))
+  if (!icon.isEmpty()) app.dock?.setIcon(icon)
 }
 
 export function createMainWindow(globals: Globals) {
