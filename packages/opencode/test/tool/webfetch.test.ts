@@ -16,6 +16,8 @@ const ctx = {
   ask: async () => {},
 }
 
+type TimerID = ReturnType<typeof setTimeout>
+
 async function withFetch(
   mockFetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
   fn: () => Promise<void>,
@@ -26,6 +28,32 @@ async function withFetch(
     await fn()
   } finally {
     globalThis.fetch = originalFetch
+  }
+}
+
+async function withTimers(fn: (state: { ids: TimerID[]; cleared: TimerID[] }) => Promise<void>) {
+  const set = globalThis.setTimeout
+  const clear = globalThis.clearTimeout
+  const ids: TimerID[] = []
+  const cleared: TimerID[] = []
+
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const id = set(...args)
+    ids.push(id)
+    return id
+  }) as typeof setTimeout
+
+  globalThis.clearTimeout = ((id?: TimerID) => {
+    if (id !== undefined) cleared.push(id)
+    return clear(id)
+  }) as typeof clearTimeout
+
+  try {
+    await fn({ ids, cleared })
+  } finally {
+    ids.forEach(clear)
+    globalThis.setTimeout = set
+    globalThis.clearTimeout = clear
   }
 }
 
@@ -96,5 +124,30 @@ describe("tool.webfetch", () => {
         })
       },
     )
+  })
+
+  test("clears timeout when fetch rejects", async () => {
+    await withTimers(async ({ ids, cleared }) => {
+      await withFetch(
+        async () => {
+          throw new Error("boom")
+        },
+        async () => {
+          await Instance.provide({
+            directory: projectRoot,
+            fn: async () => {
+              const webfetch = await WebFetchTool.init()
+              await expect(
+                webfetch.execute({ url: "https://example.com/file.txt", format: "text" }, ctx),
+              ).rejects.toThrow("boom")
+            },
+          })
+        },
+      )
+
+      expect(ids).toHaveLength(1)
+      expect(cleared).toHaveLength(1)
+      expect(cleared[0]).toBe(ids[0])
+    })
   })
 })
