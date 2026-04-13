@@ -37,7 +37,7 @@ export function createMainWindow(globals: Globals) {
     y: state.y,
     width: state.width,
     height: state.height,
-    show: true,
+    show: false,
     title: "OpenCode",
     icon: iconPath(),
     ...(process.platform === "darwin"
@@ -67,6 +67,10 @@ export function createMainWindow(globals: Globals) {
   loadWindow(win, "index.html")
   wireZoom(win)
   injectGlobals(win, globals)
+
+  win.once("ready-to-show", () => {
+    win.show()
+  })
 
   return win
 }
