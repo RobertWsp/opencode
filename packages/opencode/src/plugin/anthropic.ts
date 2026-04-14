@@ -3,15 +3,18 @@ import { APICallError } from "ai"
 import { Log } from "../util/log"
 import { OAUTH_DUMMY_KEY, Auth } from "../auth"
 import { generatePKCE } from "@openauthjs/openauth/pkce"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 
 const log = Log.create({ service: "plugin.anthropic" })
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
-const CLI_VERSION = "2.1.80"
+const CLI_VERSION = "2.1.107"
 const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
 const BILLING_SALT = "59cf53e54c78"
+
+// Persistent session ID per process (matches Claude Code behavior)
+const SESSION_ID = randomUUID()
 
 function firstUserMessageText(messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>): string {
   const msg = messages.find((m) => m.role === "user")
@@ -97,6 +100,18 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
     auth: {
       provider: "anthropic",
       async loader(getAuth, provider) {
+        // Bypass plugin when routing through an external proxy (e.g. Meridian).
+        // Pass through the env-var API key so OpenCode uses it as a plain
+        // API-key client instead of the OAuth intercept path.
+        if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY) {
+          log.info("ANTHROPIC_BASE_URL set — bypassing OAuth plugin", {
+            baseURL: process.env.ANTHROPIC_BASE_URL,
+          })
+          return {
+            apiKey: process.env.ANTHROPIC_API_KEY,
+            baseURL: process.env.ANTHROPIC_BASE_URL,
+          }
+        }
         const auth = await getAuth()
         if (auth.type === "oauth") {
           for (const model of Object.values(provider.models)) {
@@ -215,7 +230,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 }
               }
 
-              // Build headers — exact match with Claude Code 2.1.80 captured traffic
+              // Build headers — aligned with Claude Code 2.1.107
               const headers = new Headers()
               if (input instanceof Request) {
                 input.headers.forEach((value, key) => headers.set(key, value))
@@ -234,7 +249,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 }
               }
 
-              // Beta headers — matched from Claude Code 2.1.80 network capture
+              // Beta headers — matched from Claude Code 2.1.107
               const incoming = headers.get("anthropic-beta") || ""
               const existing = incoming.split(",").map((b) => b.trim()).filter(Boolean)
               const required = [
@@ -243,6 +258,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 "context-management-2025-06-27",
                 "prompt-caching-scope-2026-01-05",
                 "claude-code-20250219",
+                "files-api-2025-04-14",
               ]
               // context-1m for 4.6 models — enable via ANTHROPIC_1M_CONTEXT=true (requires Max plan or Extra Usage)
               if (process.env.ANTHROPIC_1M_CONTEXT === "true") {
@@ -255,6 +271,9 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
               headers.set("anthropic-dangerous-direct-browser-access", "true")
               headers.set("user-agent", API_USER_AGENT)
               headers.set("x-app", "cli")
+              headers.set("x-client-request-id", randomUUID())
+              headers.set("x-claude-code-session-id", SESSION_ID)
+              headers.set("x-environment-runner-version", CLI_VERSION)
               headers.delete("x-api-key")
 
               // Append ?beta=true to /v1/messages requests

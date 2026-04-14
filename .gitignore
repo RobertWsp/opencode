@@ -29,3 +29,7 @@ opencode-dev
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Local runtime db
+packages/opencode/opencode.db
+*.db
