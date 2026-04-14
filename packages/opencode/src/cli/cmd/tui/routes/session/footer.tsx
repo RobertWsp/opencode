@@ -1,15 +1,17 @@
-import { createMemo, Match, onCleanup, onMount, Show, Switch } from "solid-js"
+import { createEffect, createMemo, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useSync } from "../../context/sync"
 import { useDirectory } from "../../context/directory"
 import { useConnected } from "../../component/dialog-model"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
+import { useRoutingDecision, type TierBadge } from "../../context/routing-decision"
 
 export function Footer() {
   const { theme } = useTheme()
   const sync = useSync()
   const route = useRoute()
+  const routing = useRoutingDecision()
   const mcp = createMemo(() => Object.values(sync.data.mcp).filter((x) => x.status === "connected").length)
   const mcpError = createMemo(() => Object.values(sync.data.mcp).some((x) => x.status === "failed"))
   const lsp = createMemo(() => Object.keys(sync.data.lsp))
@@ -19,6 +21,49 @@ export function Footer() {
   })
   const directory = useDirectory()
   const connected = useConnected()
+
+  // Sync the active session with the routing decision context so the
+  // polling reader only considers decisions from the current session.
+  createEffect(() => {
+    if (route.data.type === "session") {
+      routing.setActiveSession(route.data.sessionID)
+    } else {
+      routing.setActiveSession(null)
+    }
+  })
+
+  const routerLastDecision = createMemo(() => routing.lastDecision())
+  const routerOverride = createMemo(() => routing.override())
+
+  function tierColor(tier: TierBadge | undefined) {
+    if (!tier) return theme.textMuted
+    switch (tier) {
+      case "opus":
+        return theme.warning
+      case "opus-plan":
+        return theme.accent
+      case "sonnet":
+        return theme.info
+      case "haiku":
+        return theme.success
+    }
+  }
+
+  const routerBadge = createMemo(() => {
+    const override = routerOverride()
+    if (override) {
+      return { tier: override.tier, reason: "pinned", conf: 0 }
+    }
+    const d = routerLastDecision()
+    if (!d) return null
+    const firstReason = d.reasons[0] ?? "default"
+    const colon = firstReason.indexOf(":")
+    return {
+      tier: d.tier,
+      reason: colon > 0 ? firstReason.slice(colon + 1) : firstReason,
+      conf: d.confidence,
+    }
+  })
 
   const [store, setStore] = createStore({
     welcome: false,
@@ -81,6 +126,15 @@ export function Footer() {
                 </Switch>
                 {mcp()} MCP
               </text>
+            </Show>
+            <Show when={routerBadge()}>
+              {(badge) => (
+                <text fg={theme.text}>
+                  <span style={{ fg: tierColor(badge().tier) }}>◆ </span>
+                  <span style={{ fg: tierColor(badge().tier) }}>{badge().tier}</span>
+                  <span style={{ fg: theme.textMuted }}> ← {badge().reason}</span>
+                </text>
+              )}
             </Show>
             <text fg={theme.textMuted}>/status</text>
           </Match>

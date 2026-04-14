@@ -43,6 +43,10 @@ import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { TuiConfigProvider } from "./context/tui-config"
 import { TuiConfig } from "@/config/tui"
+import { RoutingDecisionProvider, useRoutingDecision } from "./context/routing-decision"
+import { DialogModelRouter } from "./component/dialog-model-router"
+import { DialogRoutingInspector } from "./component/dialog-routing-inspector"
+import { DialogRoutingStats } from "./component/dialog-routing-stats"
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
@@ -162,7 +166,9 @@ export function tui(input: {
                                         <FrecencyProvider>
                                           <PromptHistoryProvider>
                                             <PromptRefProvider>
-                                              <App />
+                                              <RoutingDecisionProvider>
+                                                <App />
+                                              </RoutingDecisionProvider>
                                             </PromptRefProvider>
                                           </PromptHistoryProvider>
                                         </FrecencyProvider>
@@ -444,6 +450,36 @@ function App() {
       },
       onSelect: () => {
         dialog.replace(() => <DialogModel />)
+      },
+    },
+    {
+      title: "Model router",
+      value: "model.router",
+      category: "Agent",
+      slash: {
+        name: "model",
+        aliases: ["router"],
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogModelRouter />)
+      },
+    },
+    {
+      title: "Routing inspector",
+      value: "model.router.inspector",
+      category: "Agent",
+      hidden: true,
+      onSelect: () => {
+        dialog.replace(() => <DialogRoutingInspector />)
+      },
+    },
+    {
+      title: "Routing stats",
+      value: "model.router.stats",
+      category: "Agent",
+      hidden: true,
+      onSelect: () => {
+        dialog.replace(() => <DialogRoutingStats />)
       },
     },
     {

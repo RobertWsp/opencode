@@ -17,6 +17,7 @@ import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { CONFABULATION_PATTERN, CONFABULATION_QUARANTINE_NOTICE } from "./constants"
+import { RouterNotifications } from "./router-notifications"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -39,6 +40,28 @@ export namespace SessionProcessor {
       ignored: true,
       synthetic: true,
     })
+  }
+
+  /**
+   * Drain the router notification queue for this session and inject each
+   * pending notification as a synthetic text part on the assistant message.
+   * Same pattern as injectSwitchNotification, but the source is the
+   * oh-my-opencode model-router plugin (via RouterNotifications globalThis
+   * queue).
+   */
+  async function drainRouterNotifications(msg: MessageV2.Assistant, sessionID: string) {
+    const pending = RouterNotifications.consume(sessionID)
+    for (const entry of pending) {
+      await Session.updatePart({
+        id: Identifier.ascending("part"),
+        messageID: msg.id,
+        sessionID,
+        type: "text",
+        text: entry.text,
+        ignored: true,
+        synthetic: true,
+      })
+    }
   }
 
   export type Info = Awaited<ReturnType<typeof create>>
@@ -66,6 +89,10 @@ export namespace SessionProcessor {
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
+        // Drain any pending router notifications so they appear in the
+        // conversation history before the assistant's reply — same UX as
+        // account switch notifications.
+        await drainRouterNotifications(input.assistantMessage, input.sessionID)
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         let switches = 0
         while (true) {

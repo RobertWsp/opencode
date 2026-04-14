@@ -140,7 +140,11 @@ const targets = singleFlag
     })
   : allTargets
 
-await $`rm -rf dist`
+// Allow overriding the output dir so we can build into a side location
+// (e.g. "dist-v2") without touching the binary currently in use.
+// Default: "dist" (unchanged behavior).
+const outDir = process.env.OPENCODE_BUILD_OUT ?? "dist"
+await $`rm -rf ${outDir}`
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
@@ -158,8 +162,8 @@ for (const item of targets) {
   ]
     .filter(Boolean)
     .join("-")
-  console.log(`building ${name}`)
-  await $`mkdir -p dist/${name}/bin`
+  console.log(`building ${name} → ${outDir}/${name}`)
+  await $`mkdir -p ${outDir}/${name}/bin`
 
   const localPath = path.resolve(dir, "node_modules/@opentui/core/parser.worker.js")
   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
@@ -181,7 +185,7 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
+      outfile: `${outDir}/${name}/bin/opencode`,
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -196,8 +200,8 @@ for (const item of targets) {
     },
   })
 
-  await $`rm -rf ./dist/${name}/bin/tui`
-  await Bun.file(`dist/${name}/package.json`).write(
+  await $`rm -rf ./${outDir}/${name}/bin/tui`
+  await Bun.file(`${outDir}/${name}/package.json`).write(
     JSON.stringify(
       {
         name,
@@ -215,12 +219,12 @@ for (const item of targets) {
 if (Script.release) {
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
-      await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+      await $`tar -czf ../../${key}.tar.gz *`.cwd(`${outDir}/${key}/bin`)
     } else {
-      await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
+      await $`zip -r ../../${key}.zip *`.cwd(`${outDir}/${key}/bin`)
     }
   }
-  await $`gh release upload v${Script.version} ./dist/*.zip ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
+  await $`gh release upload v${Script.version} ./${outDir}/*.zip ./${outDir}/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
 }
 
 export { binaries }
