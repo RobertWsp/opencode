@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { APICallError } from "ai"
 import { MessageV2 } from "../../src/session/message-v2"
-import { PRUNED_TOOL_OUTPUT_NOTICE } from "../../src/session/constants"
+import {
+  PRUNED_TOOL_OUTPUT_NOTICE,
+  CONFABULATION_QUARANTINE_NOTICE,
+} from "../../src/session/constants"
 import type { Provider } from "../../src/provider/provider"
 
 const sessionID = "session"
@@ -551,6 +554,79 @@ describe("session.message-v2.toModelMessage", () => {
         output: { type: "error-text", value: PRUNED_TOOL_OUTPUT_NOTICE },
       }),
     ])
+  })
+
+  test("quarantines assistant text parts that contain fabricated tool-call rendering", () => {
+    // Patch 5: when a prior assistant turn's text matches CONFABULATION_PATTERN,
+    // replace its content before sending to the model. Without this, the model
+    // reads its own prior contaminated output and imitates the format on new
+    // turns — the bug is self-reinforcing within a single session.
+    const userID = "m-user-confab"
+    const assistantID = "m-assistant-confab"
+    const fakeID = "toolu_01abcFABRICATEDXXXXXX"
+    const fakeBuildClaim = "BUILD SUCCESSFUL in 10m 2s"
+
+    const contaminatedText =
+      "Agora gradlew build:\n" +
+      '[Tool Use: mcp__oc__bash({"command":"./gradlew assembleRelease"})]\n\n' +
+      `H: [Tool Result for ${fakeID}: ${fakeBuildClaim}]\n\n` +
+      "Build OK!"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "build it" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "text",
+            text: contaminatedText,
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const serialized = JSON.stringify(result)
+
+    // The fabricated ID and invented output must be gone — the model must not
+    // see them as a "past example" to imitate.
+    expect(serialized).not.toContain(fakeID)
+    expect(serialized).not.toContain(fakeBuildClaim)
+    expect(serialized).not.toContain("[Tool Use: mcp__oc__bash")
+    // The quarantine notice replaces the content entirely.
+    expect(serialized).toContain(CONFABULATION_QUARANTINE_NOTICE)
+  })
+
+  test("clean assistant text parts pass through untouched", () => {
+    // Regression guard: make sure Patch 5 doesn't eat legitimate text that
+    // happens to mention tools in prose.
+    const userID = "m-user-clean"
+    const assistantID = "m-assistant-clean"
+    const legitimate =
+      "I ran the bash tool and it failed with a yallist error. " +
+      "Let me try again with a clean install."
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "build it" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          { ...basePart(assistantID, "a1"), type: "text", text: legitimate },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const serialized = JSON.stringify(result)
+    expect(serialized).toContain(legitimate)
+    expect(serialized).not.toContain(CONFABULATION_QUARANTINE_NOTICE)
   })
 
   test("converts assistant tool error into error-text tool result", () => {

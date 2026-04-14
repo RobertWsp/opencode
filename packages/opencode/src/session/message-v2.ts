@@ -15,7 +15,11 @@ import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { type SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
-import { PRUNED_TOOL_OUTPUT_NOTICE } from "./constants"
+import {
+  PRUNED_TOOL_OUTPUT_NOTICE,
+  CONFABULATION_PATTERN,
+  CONFABULATION_QUARANTINE_NOTICE,
+} from "./constants"
 
 export namespace MessageV2 {
   export function isMedia(mime: string) {
@@ -622,12 +626,23 @@ export namespace MessageV2 {
           parts: [],
         }
         for (const part of msg.parts) {
-          if (part.type === "text")
+          if (part.type === "text") {
+            // Patch 5: quarantine self-reinforcing confabulation.
+            // If a prior assistant turn contains text that imitates tool-call
+            // syntax, replace the body with a clear notice before the model
+            // sees it. Otherwise the model reads its own past output, learns
+            // the pattern, and emits more of the same on the next turn — a
+            // self-reinforcing loop Patch 1/2/3 cannot break since those
+            // patches never rewrite existing text parts.
+            const text = CONFABULATION_PATTERN.test(part.text)
+              ? CONFABULATION_QUARANTINE_NOTICE
+              : part.text
             assistantMessage.parts.push({
               type: "text",
-              text: part.text,
+              text,
               ...(differentModel ? {} : { providerMetadata: part.metadata }),
             })
+          }
           if (part.type === "step-start")
             assistantMessage.parts.push({
               type: "step-start",

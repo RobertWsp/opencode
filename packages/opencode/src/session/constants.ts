@@ -75,12 +75,34 @@ export const POST_COMPACT_REALITY_CHECK =
  * "H: [Tool Result for toolu_xxx: ...]".
  *
  * This format is not produced by any OpenCode or AI SDK code path (verified
- * by exhaustive grep). It is emitted by the model itself when it tries to
- * reconstruct pruned tool outputs from memory. A match is a strong signal
- * that Patch 1 (pruned → output-error) isn't reaching this code path for
- * some reason, or that a new failure mode has appeared.
+ * by exhaustive grep). It is emitted by the model itself — either when it
+ * tries to reconstruct pruned outputs (addressed by Patch 1) or when it
+ * learns from its own prior contaminated text in a long session (addressed
+ * by Patch 5: quarantine such text on reload).
  *
  * The pattern is anchored on the `toolu_` prefix for the result branch to
  * avoid false positives on legitimate inline discussions of tool usage.
  */
 export const CONFABULATION_PATTERN = /\[Tool Use:\s+\w+\(|H:\s*\[Tool Result for\s+toolu_/
+
+/**
+ * Replacement content for assistant text parts that match
+ * CONFABULATION_PATTERN. When the model generates text containing the
+ * fabricated tool-call format once, every subsequent turn sees the previous
+ * output and is very likely to imitate it — the pattern becomes
+ * self-reinforcing and Patch 1/2/3 can't break it (they don't touch text
+ * parts already written to the DB).
+ *
+ * Patch 5 rewrites the text of matching parts at toModelMessages time, so
+ * the model sees a clear "this was bad, don't do it" marker instead of the
+ * offending text. The DB is not modified — the rewrite happens on every
+ * load, so existing sessions recover automatically the next time they are
+ * opened with a Patch-5-enabled binary.
+ */
+export const CONFABULATION_QUARANTINE_NOTICE =
+  "[Redacted by confabulation detector: this assistant turn previously " +
+  "contained text that imitated tool-call syntax like '[Tool Use: X(...)]' " +
+  "or 'H: [Tool Result for toolu_...]' with fabricated tool IDs and " +
+  "invented outputs. It is NOT a real tool call history. Do NOT imitate " +
+  "this format. When you need to use a tool, emit a real tool_use block — " +
+  "never narrate a tool call in text.]"
