@@ -242,6 +242,7 @@ const EXHAUSTION_PATTERNS = [
   /plan.?limit/i,
   /usage.?limit/i,
   /free.?usage/i,
+  /out of.+usage/i,
   /account.?limit/i,
   /exceeded.*(?:monthly|daily|weekly)/i,
   /FreeUsageLimitError/i,
