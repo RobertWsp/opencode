@@ -14,9 +14,18 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import {
+  COMPACTION_ANTI_CONFAB_RULES as ANTI_CONFAB_RULES_SOURCE,
+  POST_COMPACT_REALITY_CHECK as REALITY_CHECK_SOURCE,
+} from "./constants"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
+
+  // Re-exported from ./constants so callers can reach them through the
+  // SessionCompaction namespace without importing both modules.
+  export const COMPACTION_ANTI_CONFAB_RULES = ANTI_CONFAB_RULES_SOURCE
+  export const POST_COMPACT_REALITY_CHECK = REALITY_CHECK_SOURCE
 
   export const Event = {
     Compacted: BusEvent.define(
@@ -170,11 +179,12 @@ export namespace SessionCompaction {
       { sessionID: input.sessionID },
       { context: [], prompt: undefined },
     )
-    const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
+    const defaultPrompt = `${ANTI_CONFAB_RULES_SOURCE}
+Provide a detailed summary of our conversation above, for another agent to continue the work.
 Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
 The summary that you construct will be used so that another agent can read it and continue the work.
 
-When constructing the summary, try to stick to this template:
+When constructing the summary, stick to this template:
 ---
 ## Goal
 
@@ -189,13 +199,21 @@ When constructing the summary, try to stick to this template:
 
 [What notable things were learned during this conversation that would be useful for the next agent to know when continuing the work]
 
-## Accomplished
+## Verified facts (as of compaction)
 
-[What work has been completed, what work is still in progress, and what work is left?]
+[Things confirmed by tool output earlier in the conversation. Each item MUST be marked "(as of compaction)" so the next agent knows to re-verify.]
+
+## Plans and intent
+
+[What work has been completed, what work is still in progress, and what work is left? Distinguish between "confirmed done" and "attempted but unverified".]
 
 ## Relevant files / directories
 
-[Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
+[Structured list of files read/edited/created. Plain strings only — do NOT include tool_use IDs or tool call renderings.]
+
+## Must re-verify before use
+
+[State that may have changed since pruning or compaction. The next agent should call fresh tools before acting on these facts.]
 ---`
 
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
@@ -270,6 +288,7 @@ When constructing the summary, try to stick to this template:
           model: userMessage.model,
         })
         const text =
+          REALITY_CHECK_SOURCE +
           (input.overflow
             ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
             : "") +

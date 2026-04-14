@@ -7,6 +7,11 @@ import { Log } from "../../src/util/log"
 import { tmpdir } from "../fixture/fixture"
 import { Session } from "../../src/session"
 import type { Provider } from "../../src/provider/provider"
+import {
+  COMPACTION_ANTI_CONFAB_RULES,
+  POST_COMPACT_REALITY_CHECK,
+  CONFABULATION_PATTERN,
+} from "../../src/session/constants"
 
 Log.init({ print: false })
 
@@ -420,4 +425,56 @@ describe("session.getUsage", () => {
       expect(result.tokens.total).toBe(2000)
     },
   )
+})
+
+describe("session.compaction.anti-confabulation guards", () => {
+  test("defaultPrompt embeds the anti-confabulation rules", () => {
+    // The defaultPrompt is not exported directly, but SessionCompaction.process
+    // uses it verbatim when no plugin overrides it. We assert on the exported
+    // constant instead — the patch wires it in, and Patch 2 asserts
+    // structurally that the rules string contains the load-bearing guidance.
+    expect(COMPACTION_ANTI_CONFAB_RULES).toContain("toolu_")
+    expect(COMPACTION_ANTI_CONFAB_RULES).toContain("[Tool Use:")
+    expect(COMPACTION_ANTI_CONFAB_RULES).toContain("hallucination bait")
+    expect(COMPACTION_ANTI_CONFAB_RULES).toContain("Verified facts")
+    expect(COMPACTION_ANTI_CONFAB_RULES).toContain("Must re-verify")
+  })
+
+  test("POST_COMPACT_REALITY_CHECK instructs the next turn to verify before answering", () => {
+    expect(POST_COMPACT_REALITY_CHECK).toContain("Context was just compacted")
+    expect(POST_COMPACT_REALITY_CHECK).toContain("verification tool")
+    expect(POST_COMPACT_REALITY_CHECK).toContain("Do NOT")
+    expect(POST_COMPACT_REALITY_CHECK).toContain("summary alone")
+  })
+
+  test("SessionCompaction exposes the reality-check preamble constant", () => {
+    // Re-exported so call sites can compose without re-importing constants.ts.
+    expect(SessionCompaction.POST_COMPACT_REALITY_CHECK).toBe(POST_COMPACT_REALITY_CHECK)
+    expect(SessionCompaction.COMPACTION_ANTI_CONFAB_RULES).toBe(COMPACTION_ANTI_CONFAB_RULES)
+  })
+
+  test("CONFABULATION_PATTERN detects fabricated tool use narrative", () => {
+    const fabricated = [
+      '[Tool Use: bash({"command":"ls"})]\n\nH: [Tool Result for toolu_01N3mNXUyiPZhRXPvPBDr6vQ: total 73M]',
+      '[Tool Use: read({"filePath":"/tmp/x"})]',
+      'some prose then H: [Tool Result for toolu_01XYZabc123456789: content]',
+    ]
+    for (const sample of fabricated) {
+      expect(CONFABULATION_PATTERN.test(sample)).toBe(true)
+    }
+  })
+
+  test("CONFABULATION_PATTERN does not flag innocuous prose about tools", () => {
+    // Avoid false positives on normal text that happens to mention tools.
+    const clean = [
+      "I ran the bash tool and it returned an error.",
+      "The read tool is unavailable in this mode.",
+      "H: this line just happens to start with H and a colon.",
+      "Tool Use is a concept in the docs — not a literal bracketed tag here.",
+      "We should verify before trusting tool output.",
+    ]
+    for (const sample of clean) {
+      expect(CONFABULATION_PATTERN.test(sample)).toBe(false)
+    }
+  })
 })
