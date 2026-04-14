@@ -12,6 +12,79 @@ import { tmpdir } from "../fixture/fixture"
 import type { Agent } from "../../src/agent/agent"
 import type { MessageV2 } from "../../src/session/message-v2"
 
+describe("session.llm.repairToolName", () => {
+  // Minimal shape — the function only reads keys from the tools map.
+  const tools = {
+    bash: true,
+    read: true,
+    background_output: true,
+    github_get_commit: true,
+  } as Record<string, unknown>
+
+  test("returns null when tool name is already in the registry", () => {
+    // The SDK never invokes repair for a valid name, but the function must
+    // still be safe to call with one: it should report no repair needed.
+    expect(LLM.repairToolName("bash", tools)).toBeNull()
+  })
+
+  test("repairs a case-mismatch with lowercase lookup", () => {
+    expect(LLM.repairToolName("BASH", tools)).toEqual({
+      found: "bash",
+      reason: "lowercase",
+    })
+  })
+
+  test("repairs mcp__oc__<tool> by stripping the Meridian passthrough prefix", () => {
+    // The canonical failure we observed in the wild: Claude emitted
+    // "mcp__oc__background_output" against a session running through Meridian,
+    // whose stripMcpPrefix didn't reach this request for whatever reason.
+    // OpenCode should still recover.
+    expect(LLM.repairToolName("mcp__oc__background_output", tools)).toEqual({
+      found: "background_output",
+      reason: "mcp-prefix-strip",
+    })
+  })
+
+  test("repairs mcp__<server>__<tool> to <server>_<tool> for OpenCode MCP namespace", () => {
+    // OpenCode registers user-MCP tools as "<server>_<tool>" (single
+    // underscore). If Claude or an intermediary hallucinates the canonical
+    // MCP naming "mcp__server__tool", convert it.
+    expect(LLM.repairToolName("mcp__github__get_commit", tools)).toEqual({
+      found: "github_get_commit",
+      reason: "mcp-prefix-strip",
+    })
+  })
+
+  test("handles mcp__oc__BASH (prefix + case mismatch) in one pass", () => {
+    const result = LLM.repairToolName("mcp__oc__BASH", tools)
+    expect(result).not.toBeNull()
+    expect(result!.found).toBe("bash")
+  })
+
+  test("returns null for an unknown tool with no viable repair", () => {
+    expect(LLM.repairToolName("nonexistent_tool", tools)).toBeNull()
+  })
+
+  test("returns null for mcp__ prefix with no matching candidate", () => {
+    expect(LLM.repairToolName("mcp__foo__bar", tools)).toBeNull()
+  })
+
+  test("returns null for malformed mcp__ names (too few segments)", () => {
+    expect(LLM.repairToolName("mcp__incomplete", tools)).toBeNull()
+    expect(LLM.repairToolName("mcp__", tools)).toBeNull()
+  })
+
+  test("preserves original double-underscore-containing tool name when stripping", () => {
+    // Tools like "mcp__oc__has__nested__underscores" should join the tail
+    // parts back with "__" and look up that exact key if present.
+    const t = { has__nested__underscores: true, oc_has__nested__underscores: true } as Record<string, unknown>
+    expect(LLM.repairToolName("mcp__oc__has__nested__underscores", t)).toEqual({
+      found: "has__nested__underscores",
+      reason: "mcp-prefix-strip",
+    })
+  })
+})
+
 describe("session.llm.hasToolCalls", () => {
   test("returns false for empty messages array", () => {
     expect(LLM.hasToolCalls([])).toBe(false)

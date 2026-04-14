@@ -27,6 +27,68 @@ export namespace LLM {
   const log = Log.create({ service: "llm" })
   export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
+  /**
+   * Try to repair an unknown tool name to a valid registry key.
+   *
+   * Returns the repaired name + reason, or null when no repair is possible.
+   * Pure function — no side effects, only reads keys from `tools`.
+   *
+   * Strategies, in order:
+   *   1. **lowercase**   — the existing fix for providers that up-case.
+   *   2. **mcp-prefix-strip** — recover from two observed failure modes:
+   *      a) Meridian's passthrough MCP wrapper didn't strip its `mcp__oc__`
+   *         prefix on a specific tool_use (seen in the wild with
+   *         `mcp__oc__background_output` even though Meridian's
+   *         stripMcpPrefix is nominally universal).
+   *      b) The model hallucinated an `mcp__<server>__` prefix on a tool
+   *         that wasn't actually wrapped (a variant of the confabulation
+   *         behavior Patches 1-6 address for text — this covers tool_use).
+   *
+   *   For mcp-prefix-strip we try the bare tool name first (Meridian
+   *   wrapper case) and then `<server>_<tool>` (OpenCode's MCP namespace
+   *   convention). Each candidate is also tried lowercase.
+   */
+  export function repairToolName(
+    toolName: string,
+    tools: Record<string, unknown>,
+  ): { found: string; reason: "lowercase" | "mcp-prefix-strip" } | null {
+    // The SDK never invokes repair when the name is already valid, but this
+    // function is public + pure so guard against that input anyway.
+    if (tools[toolName]) return null
+
+    // Strategy 1: case-insensitive lookup
+    const lower = toolName.toLowerCase()
+    if (lower !== toolName && tools[lower]) {
+      return { found: lower, reason: "lowercase" }
+    }
+
+    // Strategy 2: strip mcp__<server>__ prefix
+    if (toolName.startsWith("mcp__")) {
+      const parts = toolName.split("__")
+      // Need at least ["mcp", server, ...toolParts] → length >= 3, and the
+      // server segment must be non-empty (so "mcp____foo" doesn't qualify).
+      if (parts.length >= 3 && parts[1].length > 0) {
+        const server = parts[1]
+        const bareTool = parts.slice(2).join("__")
+        if (bareTool.length > 0) {
+          const candidates = [
+            bareTool, // "mcp__oc__background_output" → "background_output"
+            `${server}_${bareTool}`, // "mcp__github__get_commit" → "github_get_commit"
+            bareTool.toLowerCase(),
+            `${server}_${bareTool}`.toLowerCase(),
+          ]
+          for (const candidate of candidates) {
+            if (tools[candidate]) {
+              return { found: candidate, reason: "mcp-prefix-strip" }
+            }
+          }
+        }
+      }
+    }
+
+    return null
+  }
+
   export type StreamInput = {
     user: MessageV2.User
     sessionID: string
@@ -176,21 +238,23 @@ export namespace LLM {
         })
       },
       async experimental_repairToolCall(failed) {
-        const lower = failed.toolCall.toolName.toLowerCase()
-        if (lower !== failed.toolCall.toolName && tools[lower]) {
+        const original = failed.toolCall.toolName
+        const repaired = repairToolName(original, tools as Record<string, unknown>)
+        if (repaired) {
           l.info("repairing tool call", {
-            tool: failed.toolCall.toolName,
-            repaired: lower,
+            tool: original,
+            repaired: repaired.found,
+            reason: repaired.reason,
           })
           return {
             ...failed.toolCall,
-            toolName: lower,
+            toolName: repaired.found,
           }
         }
         return {
           ...failed.toolCall,
           input: JSON.stringify({
-            tool: failed.toolCall.toolName,
+            tool: original,
             error: failed.error.message,
           }),
           toolName: "invalid",
