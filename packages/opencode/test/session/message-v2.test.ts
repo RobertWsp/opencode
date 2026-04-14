@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { APICallError } from "ai"
 import { MessageV2 } from "../../src/session/message-v2"
+import { PRUNED_TOOL_OUTPUT_NOTICE } from "../../src/session/constants"
 import type { Provider } from "../../src/provider/provider"
 
 const sessionID = "session"
@@ -430,7 +431,7 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("replaces compacted tool output with placeholder", () => {
+  test("pruned tool parts are emitted as error-text with anti-reconstruction notice", () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
 
@@ -456,7 +457,7 @@ describe("session.message-v2.toModelMessage", () => {
             state: {
               status: "completed",
               input: { cmd: "ls" },
-              output: "this should be cleared",
+              output: "the previous contents — must not reach the model",
               title: "Bash",
               metadata: {},
               time: { start: 0, end: 1, compacted: 1 },
@@ -490,10 +491,65 @@ describe("session.message-v2.toModelMessage", () => {
             type: "tool-result",
             toolCallId: "call-1",
             toolName: "bash",
-            output: { type: "text", value: "[Old tool result content cleared]" },
+            output: { type: "error-text", value: PRUNED_TOOL_OUTPUT_NOTICE },
           },
         ],
       },
+    ])
+  })
+
+  test("pruned tool part input is preserved but the original output never reaches the wire", () => {
+    // Regression guard: the pre-patch behavior was to emit the sentinel
+    // "[Old tool result content cleared]" as a successful output, which caused
+    // the model to reconstruct the missing output from memory. Ensure the
+    // original output string is absent from every message after conversion,
+    // and that the error notice is present exactly where we expect it.
+    const userID = "m-user-2"
+    const assistantID = "m-assistant-2"
+    const secretOutput = "SECRET_OUTPUT_MUST_NOT_LEAK_1234567890"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-99",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: "/tmp/x.txt", offset: 1, limit: 1 },
+              output: secretOutput,
+              title: "Read",
+              metadata: {},
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain(secretOutput)
+    expect(serialized).toContain(PRUNED_TOOL_OUTPUT_NOTICE)
+
+    // Pruned call must still be structurally present (input preserved) so the
+    // assistant history stays balanced (every tool_use paired with a tool_result).
+    const toolMsg = result.find((m) => m.role === "tool")
+    expect(toolMsg).toBeDefined()
+    expect(toolMsg!.content).toEqual([
+      expect.objectContaining({
+        type: "tool-result",
+        toolCallId: "call-99",
+        toolName: "read",
+        output: { type: "error-text", value: PRUNED_TOOL_OUTPUT_NOTICE },
+      }),
     ])
   })
 

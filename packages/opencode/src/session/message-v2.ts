@@ -15,6 +15,7 @@ import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { type SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
+import { PRUNED_TOOL_OUTPUT_NOTICE } from "./constants"
 
 export namespace MessageV2 {
   export function isMedia(mime: string) {
@@ -634,8 +635,26 @@ export namespace MessageV2 {
           if (part.type === "tool") {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
-              const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              // Pruned tool parts: emit as error state instead of a "successful"
+              // call with a cleared sentinel output. Claude treats a completed
+              // call with blank output as something it can reconstruct from
+              // memory, which leads to fabricated tool_use blocks in subsequent
+              // text responses. Emitting error-text short-circuits that path:
+              // the model sees an unusable result and re-runs the tool if it
+              // needs the information.
+              if (part.state.time.compacted) {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-error",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  errorText: PRUNED_TOOL_OUTPUT_NOTICE,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+                continue
+              }
+              const outputText = part.state.output
+              const attachments = options?.stripMedia ? [] : (part.state.attachments ?? [])
 
               // For providers that don't support media in tool results, extract media files
               // (images, PDFs) to be sent as a separate user message
