@@ -16,6 +16,7 @@ import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
+import { CONFABULATION_PATTERN } from "./constants"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -358,6 +359,19 @@ export namespace SessionProcessor {
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
                     await Session.updatePart(currentText)
+                    // Telemetry for the pruned-output confabulation failure mode.
+                    // Patch 1 (pruned tool parts → error-text) is the primary
+                    // fix; this check is a passive safety net that flags any
+                    // remaining leakage so we can observe regressions without
+                    // changing runtime behavior.
+                    if (CONFABULATION_PATTERN.test(currentText.text)) {
+                      log.warn("assistant text matches confabulation pattern", {
+                        sessionID: input.sessionID,
+                        messageID: input.assistantMessage.id,
+                        partID: currentText.id,
+                        sample: currentText.text.slice(0, 240),
+                      })
+                    }
                   }
                   currentText = undefined
                   break
