@@ -16,7 +16,7 @@ import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
-import { CONFABULATION_PATTERN } from "./constants"
+import { CONFABULATION_PATTERN, CONFABULATION_QUARANTINE_NOTICE } from "./constants"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -358,20 +358,26 @@ export namespace SessionProcessor {
                       end: Date.now(),
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePart(currentText)
-                    // Telemetry for the pruned-output confabulation failure mode.
-                    // Patch 1 (pruned tool parts → error-text) is the primary
-                    // fix; this check is a passive safety net that flags any
-                    // remaining leakage so we can observe regressions without
-                    // changing runtime behavior.
+                    // Patch 6: active rewriting. If the model emitted text that
+                    // imitates tool-call syntax (e.g. "[Tool Use: bash(...)]"
+                    // or "H: [Tool Result for toolu_...]"), replace the stored
+                    // content with a quarantine notice before persisting to
+                    // the DB. Patch 4 used to only log; that was insufficient
+                    // because the confabulated text still entered the session
+                    // history and compounded on later turns. By rewriting
+                    // here, the DB row never receives fabricated examples —
+                    // neither this turn's model call context (already streamed)
+                    // nor any future turn's history will include it.
                     if (CONFABULATION_PATTERN.test(currentText.text)) {
-                      log.warn("assistant text matches confabulation pattern", {
+                      log.warn("assistant text matches confabulation pattern; replacing with quarantine notice", {
                         sessionID: input.sessionID,
                         messageID: input.assistantMessage.id,
                         partID: currentText.id,
                         sample: currentText.text.slice(0, 240),
                       })
+                      currentText.text = CONFABULATION_QUARANTINE_NOTICE
                     }
+                    await Session.updatePart(currentText)
                   }
                   currentText = undefined
                   break
