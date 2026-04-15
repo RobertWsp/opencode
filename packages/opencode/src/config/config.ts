@@ -1007,6 +1007,28 @@ export namespace Config {
         .record(z.string(), Command)
         .optional()
         .describe("Command configuration, see https://opencode.ai/docs/commands"),
+      memory: z
+        .object({
+          enabled: z.boolean().default(false).describe("Enable obsidian-memory plugin"),
+          vaultPath: z
+            .string()
+            .optional()
+            .describe("Absolute path to the Obsidian vault root (supports ~)"),
+          maxBytes: z
+            .number()
+            .int()
+            .positive()
+            .default(4096)
+            .describe("Maximum bytes injected into the system prompt"),
+          maxNotes: z
+            .number()
+            .int()
+            .positive()
+            .default(20)
+            .describe("Maximum recent notes to include when assembling the block"),
+        })
+        .optional()
+        .describe("Obsidian-backed memory plugin configuration"),
       skills: Skills.optional().describe("Additional skill folder paths"),
       watcher: z
         .object({
