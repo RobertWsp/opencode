@@ -21,7 +21,7 @@ function isInvalidated(doc: MemoryDoc | undefined): boolean {
 export type RefHealthMap = Map<string, DocRefHealth>
 
 /** Injection format flavor */
-export type InjectionStyle = "full" | "index"
+export type InjectionStyle = "full" | "index" | "progressive"
 
 /**
  * Format a deterministic `<memory-block>` string suitable for injection into
@@ -43,7 +43,14 @@ export function formatBlock(
   refHealth?: RefHealthMap,
   style: InjectionStyle = "full",
 ): string {
+  if (opts.maxBytes < 4096) {
+    console.warn(
+      `[memory] maxBytes=${opts.maxBytes} is below the Anthropic prompt caching minimum of 4096 tokens ` +
+        "(Opus 4.6/4.5). Memory blocks smaller than this threshold will not benefit from cache hits.",
+    )
+  }
   if (style === "index") return formatIndexBlock(scope, docs, opts, refHealth)
+  if (style === "progressive") return formatProgressiveBlock(scope, docs, opts, refHealth)
   const sections: string[] = []
 
   const renderShared = (doc: MemoryDoc | undefined): string | null => {
@@ -230,6 +237,67 @@ function formatIndexBlock(
     body,
     `Use /memory show <path> to read any entry in full.`,
     `</memory-index>`,
+  ].join("\n")
+}
+
+function formatProgressiveBlock(
+  scope: Scope,
+  docs: VaultDocs,
+  opts: InjectorOptions,
+  refHealth?: RefHealthMap,
+): string {
+  const sections: string[] = []
+
+  const renderShared = (doc: MemoryDoc | undefined): string | null => {
+    if (!doc || !doc.body.trim()) return null
+    if (isInvalidated(doc)) return null
+    const health = refHealth?.get(doc.path)
+    if (health?.allBroken) return null
+    const prefix = health && health.brokenCount > 0 ? "<stale-refs>\n" : ""
+    const suffix = health && health.brokenCount > 0 ? "\n</stale-refs>" : ""
+    return prefix + doc.body.trim() + suffix
+  }
+
+  const sysBody = renderShared(docs.systemShared)
+  if (sysBody) sections.push("## User Preferences\n" + sysBody)
+
+  const repoBody = renderShared(docs.repoShared)
+  if (repoBody) sections.push("## Shared (repo)\n" + repoBody)
+
+  const branchBody = renderShared(docs.branchShared)
+  if (branchBody) sections.push(`## Shared (branch: ${scope.branchSlug})\n${branchBody}`)
+
+  const valid = docs.notes.filter((n) => {
+    if (isInvalidated(n)) return false
+    const health = refHealth?.get(n.path)
+    return !health?.allBroken
+  })
+
+  if (valid.length > 0) {
+    const idx = ["## Notes Index"]
+    for (const note of valid) {
+      const title = note.meta["title"] || stripExtension(basenameFromPath(note.path))
+      const desc = note.meta["description"] || firstMeaningfulLine(note.body)
+      const kind = note.meta["memory-kind"] || ""
+      const imp = note.meta["importance"] ? `★${note.meta["importance"]}` : ""
+      const meta = [kind, imp].filter(Boolean).join(", ")
+      const ms = meta ? ` (${meta})` : ""
+      const rel = path.relative(scope.vaultRoot, note.path)
+      idx.push(`- **${title}**${ms} — ${desc} [show: ${rel}]`)
+    }
+    idx.push("")
+    idx.push("Use /memory show <path> to read full note content")
+    sections.push(idx.join("\n"))
+  }
+
+  if (sections.length === 0) return ""
+
+  const body = sections.join("\n\n")
+  const hash = createHash("sha256").update(body).digest("hex").slice(0, 8)
+  return [
+    `<memory-block repo="${scope.shortHash}" branch="${scope.branchSlug}" hash="${hash}">`,
+    body,
+    `</memory-block>`,
   ].join("\n")
 }
 

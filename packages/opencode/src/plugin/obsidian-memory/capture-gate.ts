@@ -5,6 +5,7 @@ import { loadAllEntries, selectCandidates } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
 import { detectContradiction, markSuperseded } from "./contradiction"
 import { isValidAt, titleToSlug, toEntry } from "./parse-entry"
+import { enrichWithTaskRefs } from "./task-linker"
 import { invalidateNote, rewriteNote, writeNote } from "./vault"
 import type { MemoryEntry, MemoryKind, Scope } from "./types"
 import { coerceMemoryKind } from "./types"
@@ -382,16 +383,20 @@ export class CaptureGate {
         log.info("gate UPDATE without valid target — falling back to ADD", { sessionID })
         decision.op = "ADD"
       } else {
+        const probe = batch.map((ev) => ev.summary).join(" ") + " " + decision.title + " " + decision.body
+        const updateMeta: Record<string, string> = {
+          tags: decision.tags.join(","),
+          importance: String(decision.importance ?? 0.5),
+          links: decision.links.join(","),
+          refs: refsValue,
+          "memory-kind": decision.kind,
+          "last-merged-count": String(eventCount),
+        }
+        const rich = enrichWithTaskRefs(updateMeta, probe)
+        if (rich.task) updateMeta.task = rich.task
         const ok = await rewriteNote(scope, targetCandidate.path, {
           body: decision.body,
-          meta: {
-            tags: decision.tags.join(","),
-            importance: String(decision.importance ?? 0.5),
-            links: decision.links.join(","),
-            refs: refsValue,
-            "memory-kind": decision.kind,
-            "last-merged-count": String(eventCount),
-          },
+          meta: updateMeta,
           commitMessage: `memory(update): ${targetCandidate.title} [gate importance=${decision.importance}]`,
         })
         log.info("gate updated memory", {
@@ -429,6 +434,9 @@ export class CaptureGate {
     const commitMeta = extractCommitMeta(batch)
     if (commitMeta.commit) meta.commit = commitMeta.commit
     if (commitMeta.task) meta.task = commitMeta.task
+    const probe = batch.map((ev) => ev.summary).join(" ") + " " + decision.title + " " + decision.body
+    const rich = enrichWithTaskRefs(meta, probe)
+    if (rich.task) meta.task = rich.task
 
     const filepath = await writeNote(scope, {
       title: decision.title,

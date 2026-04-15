@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { formatBlock } from "../../../src/plugin/obsidian-memory/injector"
 import type { MemoryDoc, Scope, VaultDocs } from "../../../src/plugin/obsidian-memory/types"
 
@@ -348,5 +348,164 @@ describe("formatBlock index style", () => {
       "index",
     )
     expect(block).toBe("")
+  })
+})
+
+describe("formatBlock progressive style (F4.2)", () => {
+  test("shared docs rendered in full", () => {
+    const sharedBody = "Full shared body content\nWith multiple lines"
+    const block = formatBlock(
+      makeScope(),
+      {
+        repoShared: makeDoc({
+          body: sharedBody,
+          meta: { title: "Repo Context", description: "Short" },
+          path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+        }),
+        notes: [],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "progressive",
+    )
+    expect(block).toContain(sharedBody.trim())
+    expect(block).toContain("## Shared (repo)")
+  })
+
+  test("notes rendered as compact index, full body excluded", () => {
+    const nBody = "This is the full note body that must not appear"
+    const block = formatBlock(
+      makeScope(),
+      {
+        notes: [
+          makeDoc({
+            body: nBody,
+            meta: {
+              title: "My Note",
+              description: "Brief description",
+              "memory-kind": "gotcha",
+              importance: "0.9",
+            },
+            path: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes/my-note.md",
+          }),
+        ],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "progressive",
+    )
+    expect(block).toContain("My Note")
+    expect(block).toContain("Brief description")
+    expect(block).not.toContain(nBody)
+  })
+
+  test("each note entry includes show: <relpath> hint", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        notes: [
+          makeDoc({
+            body: "note body",
+            meta: { title: "My Note", description: "desc" },
+            path: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes/my-note.md",
+          }),
+        ],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "progressive",
+    )
+    expect(block).toContain("show:")
+    expect(block).toContain("opencode/repos/test-abc123/branches/main/notes/my-note.md")
+  })
+
+  test("total bytes less than full mode for same input", () => {
+    const big = "x".repeat(500)
+    const docs = {
+      repoShared: makeDoc({
+        body: big,
+        meta: { title: "T", description: "D" },
+        path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+      }),
+      notes: Array.from({ length: 5 }, (_, i) =>
+        makeDoc({
+          body: big,
+          meta: { title: `note-${i}`, description: "d" },
+          path: `/tmp/vault/opencode/repos/test-abc123/branches/main/notes/${i}.md`,
+        }),
+      ),
+    }
+    const full = formatBlock(makeScope(), docs, { maxBytes: 10000 }, undefined, "full")
+    const progressive = formatBlock(makeScope(), docs, { maxBytes: 10000 }, undefined, "progressive")
+    expect(progressive.length).toBeLessThan(full.length)
+  })
+
+  test("empty notes → only shared docs, no Notes Index section", () => {
+    const block = formatBlock(
+      makeScope(),
+      { repoShared: makeDoc({ body: "repo content" }), notes: [] },
+      { maxBytes: 4096 },
+      undefined,
+      "progressive",
+    )
+    expect(block).toContain("repo content")
+    expect(block).not.toContain("Notes Index")
+    expect(block).not.toContain("Use /memory show")
+  })
+})
+
+describe("formatBlock cache optimization (F4.3)", () => {
+  test("shared docs appear before notes in full mode", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        repoShared: makeDoc({ body: "stable shared content" }),
+        notes: [makeDoc({ body: "volatile note", meta: { title: "n1" } })],
+      },
+      { maxBytes: 4096 },
+    )
+    const si = block.indexOf("stable shared content")
+    const ni = block.indexOf("volatile note")
+    expect(si).toBeGreaterThan(-1)
+    expect(ni).toBeGreaterThan(-1)
+    expect(si).toBeLessThan(ni)
+  })
+
+  test("shared docs appear before notes in progressive mode", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        repoShared: makeDoc({ body: "stable shared content" }),
+        notes: [
+          makeDoc({
+            body: "volatile note body",
+            meta: { title: "n1", description: "desc" },
+            path: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes/n1.md",
+          }),
+        ],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "progressive",
+    )
+    const si = block.indexOf("stable shared content")
+    const ni = block.indexOf("n1")
+    expect(si).toBeGreaterThan(-1)
+    expect(ni).toBeGreaterThan(-1)
+    expect(si).toBeLessThan(ni)
+  })
+
+  test("warns when maxBytes < 4096", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
+    formatBlock(makeScope(), { repoShared: makeDoc({ body: "x" }), notes: [] }, { maxBytes: 2000 })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("4096"))
+    warn.mockRestore()
+  })
+
+  test("no warning when maxBytes >= 4096", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
+    formatBlock(makeScope(), { repoShared: makeDoc({ body: "x" }), notes: [] }, { maxBytes: 4096 })
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
   })
 })

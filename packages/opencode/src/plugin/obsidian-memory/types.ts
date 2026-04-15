@@ -67,12 +67,14 @@ export interface MemoryConfig {
   /** Sonnet model ID used by the consolidator */
   consolidateModel: string
   /**
-   * Injection style (Phase 7 — progressive disclosure):
+   * Injection style (F4.2 — progressive disclosure):
    * - "full":  inject entire MEMORY.md + notes bodies (MVP default, ~1-4KB)
    * - "index": inject a compact index (title + description + refs) only; LLM
    *   uses the `memory show` command to read full bodies on demand (~300-800B)
+   * - "progressive": shared docs in full (stable, cache-friendly prefix per
+   *   F4.3) + notes as a compact index with per-entry `/memory show` hints
    */
-  injectionStyle: "full" | "index"
+  injectionStyle: "full" | "index" | "progressive"
 
   /**
    * When true, ranks injected notes via the composed retrieval scorer

@@ -1,5 +1,6 @@
 import { promises as fs } from "fs"
 import path from "path"
+import { parseFrontmatter } from "./frontmatter"
 import { aggregateStats, readRecent } from "./injection-log"
 import { writeNote } from "./vault"
 import { VaultGit } from "./vault-git"
@@ -225,8 +226,15 @@ export async function show(scope: Scope, relPath: string): Promise<CommandResult
     return { ok: false, text: "[memory] path escapes vault root" }
   }
   try {
-    const content = await fs.readFile(resolved, "utf8")
-    return { ok: true, text: "[memory] " + relPath + "\n\n" + content }
+    const raw = await fs.readFile(resolved, "utf8")
+    const p = parseFrontmatter(raw)
+    const title = p.meta["title"] || path.basename(relPath.trim(), ".md")
+    const kind = p.meta["memory-kind"] || ""
+    const imp = p.meta["importance"] ? ` ★${p.meta["importance"]}` : ""
+    const ks = kind ? ` (${kind}${imp})` : imp
+    const header = `# ${title}${ks}`
+    const txt = p.body.trim()
+    return { ok: true, text: `[memory] ${relPath.trim()}\n\n${header}\n\n${txt}` }
   } catch (err) {
     return { ok: false, text: `[memory] not found: ${errorMessage(err)}` }
   }
