@@ -8,9 +8,10 @@ import { verifyDocRefs } from "./refs"
 import { detectGitEvent, toCaptureEvent } from "./git-event-detector"
 import { computePageRank, seedsFromPrompt } from "./pagerank"
 import { noteSessionIdle, runReflection } from "./reflection-scheduler"
+import { isValidAt, toEntry } from "./parse-entry"
 import { expandQueryHyde, rankMemories } from "./retrieval"
 import { detectScope } from "./scope"
-import type { MemoryConfig, Scope, VaultDocs } from "./types"
+import type { MemoryConfig, MemoryDoc, Scope, VaultDocs } from "./types"
 import { fingerprint, loadAll } from "./vault"
 
 const log = Log.create({ service: "plugin.obsidian-memory" })
@@ -149,6 +150,26 @@ async function buildRefHealthMap(
     }),
   )
   return out
+}
+
+function filterProactive(notes: MemoryDoc[], active: Set<string>): MemoryDoc[] {
+  if (active.size === 0) return []
+  return notes.filter((n) => {
+    const e = toEntry(n)
+    if (!isValidAt(e)) return false
+    if (e.kind !== "gotcha" && e.kind !== "episode") return false
+    const refs = n.meta["refs"]
+    if (!refs) return false
+    return refs.split(",").some((r) => active.has(r.trim()))
+  })
+}
+
+function prependProactive(all: MemoryDoc[], ranked: VaultDocs, active: Set<string>): VaultDocs {
+  const proactive = filterProactive(all, active)
+  if (proactive.length === 0) return ranked
+  const paths = new Set(proactive.map((n) => n.path))
+  const rest = ranked.notes.filter((n) => !paths.has(n.path))
+  return { ...ranked, notes: [...proactive, ...rest] }
 }
 
 /**
@@ -332,11 +353,12 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         try {
           const docs = await loadAll(scope, cfgRef.maxNotes)
           const activeFiles = hookInput.sessionID ? sessionFiles.get(hookInput.sessionID) : undefined
-          const rankedDocs = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles)
-          const refHealth = await buildRefHealthMap(input.worktree, rankedDocs)
+          const ranked = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles)
+          const injected = activeFiles?.size ? prependProactive(docs.notes, ranked, activeFiles) : ranked
+          const refHealth = await buildRefHealthMap(input.worktree, injected)
           block = formatBlock(
             scope,
-            rankedDocs,
+            injected,
             { maxBytes: cfgRef.maxBytes },
             refHealth,
             cfgRef.injectionStyle,
@@ -494,4 +516,4 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
 }
 
 /** Exposed for tests */
-export const __internal = { extractFilePaths }
+export const __internal = { extractFilePaths, filterProactive }

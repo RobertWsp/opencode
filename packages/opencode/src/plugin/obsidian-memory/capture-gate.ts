@@ -46,6 +46,8 @@ interface QueueState {
   flushing: boolean
   lastUserPrompt?: string
   pendingResolvers?: Array<() => void>
+  recentHashes?: Map<string, number>
+  fileReadCount?: Map<string, number>
 }
 
 interface CircuitBreaker {
@@ -114,6 +116,7 @@ export class CaptureGate {
     if (isTrivial(ev)) return
 
     const q = this.getQueue(ev.sessionID)
+    if (isFilterable(ev, q)) return
     q.events.push(ev)
 
     if (q.events.length >= IMMEDIATE_FLUSH_THRESHOLD || q.events.length >= BATCH_MAX_EVENTS) {
@@ -442,24 +445,53 @@ export class CaptureGate {
 
 // ─── heuristic pre-filter ─────────────────────────────────────────────
 
-/**
- * Drop events that are obviously not worth a Haiku call. This is the
- * cheapest optimization possible — reading a file in `src/` is usually
- * just navigation, not learning.
- */
 function isTrivial(ev: CaptureEventInput): boolean {
   if (ev.kind !== "tool.after") return false
   const tool = (ev.details?.["tool"] ?? "") as string
-  const triviallyBoring = new Set([
-    "ls",
-    "glob",
-    "grep",
-    "websearch",
-    "webfetch",
-    "read",
-    "codesearch",
-  ])
-  if (triviallyBoring.has(tool.toLowerCase())) return true
+  const boring = new Set(["ls", "glob", "grep", "websearch", "webfetch", "read", "codesearch"])
+  if (boring.has(tool.toLowerCase())) return true
+  return false
+}
+
+const READ_ONLY_TOOLS = new Set([
+  "Read",
+  "grep",
+  "glob",
+  "lsp_diagnostics",
+  "lsp_symbols",
+  "lsp_goto_definition",
+  "lsp_find_references",
+])
+const DEDUP_WINDOW_MS = 30 * 60 * 1000
+const FILE_READ_MAX = 3
+
+function normalizeHash(text: string): string {
+  const s = text.toLowerCase().trim().replace(/\s+/g, " ")
+  let h = 5381
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
+  }
+  return h.toString(36)
+}
+
+function isFilterable(ev: CaptureEventInput, q: QueueState): boolean {
+  const tool = (ev.details?.["tool"] as string | undefined) ?? ""
+  if (READ_ONLY_TOOLS.has(tool)) return true
+
+  const hash = normalizeHash(ev.summary)
+  if (!q.recentHashes) q.recentHashes = new Map()
+  const last = q.recentHashes.get(hash)
+  if (last !== undefined && Date.now() - last < DEDUP_WINDOW_MS) return true
+  q.recentHashes.set(hash, Date.now())
+
+  const file = (ev.details?.["files"] as string[] | undefined)?.[0]
+  if (file) {
+    if (!q.fileReadCount) q.fileReadCount = new Map()
+    const count = q.fileReadCount.get(file) ?? 0
+    if (count >= FILE_READ_MAX) return true
+    q.fileReadCount.set(file, count + 1)
+  }
+
   return false
 }
 
@@ -611,6 +643,8 @@ export function parseGateResponse(raw: string): GateDecision | null {
 // Exposed for testing
 export const __internal = {
   isTrivial,
+  isFilterable,
+  normalizeHash,
   buildGateUserMessage,
   DEBOUNCE_MS,
   CIRCUIT_FAIL_THRESHOLD,

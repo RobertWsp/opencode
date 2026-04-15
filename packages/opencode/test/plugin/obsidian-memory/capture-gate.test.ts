@@ -7,8 +7,18 @@ import {
   parseGateResponse,
   CaptureGate,
 } from "../../../src/plugin/obsidian-memory/capture-gate"
+import type { CaptureEventInput } from "../../../src/plugin/obsidian-memory/capture-gate"
 import { parseFrontmatter } from "../../../src/plugin/obsidian-memory/frontmatter"
 import type { Scope } from "../../../src/plugin/obsidian-memory/types"
+
+type Queue = {
+  events: CaptureEventInput[]
+  timer: NodeJS.Timeout | null
+  flushing: boolean
+  recentHashes?: Map<string, number>
+  fileReadCount?: Map<string, number>
+}
+const makeQueue = (): Queue => ({ events: [], timer: null, flushing: false })
 
 const tempDirs: string[] = []
 
@@ -404,5 +414,163 @@ describe("wikilink validation — links must reference existing vault notes only
     expect(content).toContain("links: []")
     expect(content).not.toContain("## Related")
     expect(content).not.toContain("[[")
+  })
+})
+
+describe("isFilterable — heuristic pre-filters", () => {
+  test("Read tool → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "read src/auth.ts", details: { tool: "Read" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("grep tool → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "grep pattern", details: { tool: "grep" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("glob tool → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "glob *.ts", details: { tool: "glob" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("lsp_diagnostics → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "ran diagnostics", details: { tool: "lsp_diagnostics" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("lsp_symbols → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "lsp symbols", details: { tool: "lsp_symbols" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("lsp_goto_definition → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "goto def", details: { tool: "lsp_goto_definition" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("lsp_find_references → filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "find refs", details: { tool: "lsp_find_references" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(true)
+  })
+
+  test("write tool → NOT filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "wrote file", details: { tool: "write" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(false)
+  })
+
+  test("edit tool → NOT filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "edited file", details: { tool: "edit" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(false)
+  })
+
+  test("bash tool → NOT filtered", () => {
+    const q = makeQueue()
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "ran command", details: { tool: "bash" }, timestamp: 0 },
+        q,
+      ),
+    ).toBe(false)
+  })
+
+  test("same summary within 30min → second call filtered (dedup)", () => {
+    const q = makeQueue()
+    const ev: CaptureEventInput = {
+      kind: "tool.after",
+      sessionID: "s",
+      summary: "discovered important auth pattern in middleware",
+      details: { tool: "edit" },
+      timestamp: Date.now(),
+    }
+    expect(__internal.isFilterable(ev, q)).toBe(false)
+    expect(__internal.isFilterable(ev, q)).toBe(true)
+  })
+
+  test("same summary after 30+ min window → NOT filtered (expired)", () => {
+    const q = makeQueue()
+    const hash = __internal.normalizeHash("some repeated analysis content")
+    q.recentHashes = new Map([[hash, Date.now() - 31 * 60 * 1000]])
+    expect(
+      __internal.isFilterable(
+        { kind: "tool.after", sessionID: "s", summary: "some repeated analysis content", details: { tool: "edit" }, timestamp: Date.now() },
+        q,
+      ),
+    ).toBe(false)
+  })
+
+  test("same file referenced 3+ times → 4th call filtered", () => {
+    const q = makeQueue()
+    const ev = (n: number): CaptureEventInput => ({
+      kind: "tool.after",
+      sessionID: "s",
+      summary: `edit-${n}`,
+      details: { tool: "edit", files: ["src/auth.ts"] },
+      timestamp: Date.now(),
+    })
+    expect(__internal.isFilterable(ev(1), q)).toBe(false)
+    expect(__internal.isFilterable(ev(2), q)).toBe(false)
+    expect(__internal.isFilterable(ev(3), q)).toBe(false)
+    expect(__internal.isFilterable(ev(4), q)).toBe(true)
+  })
+
+  test("different files have independent counters", () => {
+    const q = makeQueue()
+    const ev = (file: string, n: number): CaptureEventInput => ({
+      kind: "tool.after",
+      sessionID: "s",
+      summary: `edit-${file}-${n}`,
+      details: { tool: "edit", files: [file] },
+      timestamp: Date.now(),
+    })
+    for (let i = 1; i <= 3; i++) {
+      expect(__internal.isFilterable(ev("src/a.ts", i), q)).toBe(false)
+    }
+    expect(__internal.isFilterable(ev("src/b.ts", 1), q)).toBe(false)
+    expect(__internal.isFilterable(ev("src/a.ts", 4), q)).toBe(true)
   })
 })
