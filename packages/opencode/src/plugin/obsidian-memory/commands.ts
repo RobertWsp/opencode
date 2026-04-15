@@ -2,6 +2,7 @@ import { promises as fs } from "fs"
 import path from "path"
 import { aggregateStats, readRecent } from "./injection-log"
 import { writeNote } from "./vault"
+import { VaultGit } from "./vault-git"
 import type { Scope } from "./types"
 
 /**
@@ -125,6 +126,83 @@ export async function stats(_scope: Scope): Promise<CommandResult> {
     }
   }
   return { ok: true, text: lines.join("\n") }
+}
+
+/**
+ * `/memory suggested` — list pending suggestions awaiting approval.
+ */
+export async function suggested(scope: Scope): Promise<CommandResult> {
+  try {
+    const entries = await fs.readdir(scope.suggestedDir)
+    const mdFiles = entries.filter((e) => e.endsWith(".md")).sort()
+    if (mdFiles.length === 0) {
+      return { ok: true, text: "[memory] no pending suggestions" }
+    }
+    const lines: string[] = [
+      `[memory] ${mdFiles.length} pending suggestion(s) — use /memory approve <id> or /memory reject <id>`,
+    ]
+    for (const name of mdFiles) {
+      const full = path.join(scope.suggestedDir, name)
+      const content = await fs.readFile(full, "utf8").catch(() => "")
+      const titleMatch = content.match(/^title:\s*(.+)$/m)
+      const title = titleMatch ? titleMatch[1].trim() : name
+      const impMatch = content.match(/^importance:\s*(.+)$/m)
+      const importance = impMatch ? impMatch[1].trim() : ""
+      lines.push(`  - ${name}  ★${importance}  ${title}`)
+    }
+    return { ok: true, text: lines.join("\n") }
+  } catch {
+    return { ok: true, text: "[memory] no pending suggestions" }
+  }
+}
+
+/**
+ * `/memory approve <filename>` — promote a suggested capture from
+ * suggested/ to notes/ and create a git commit.
+ */
+export async function approve(scope: Scope, filename: string): Promise<CommandResult> {
+  if (!filename.trim()) {
+    return { ok: false, text: "[memory] usage: /memory approve <filename>" }
+  }
+  const cleanName = path.basename(filename.trim())
+  const src = path.join(scope.suggestedDir, cleanName)
+  const dest = path.join(scope.notesDir, cleanName)
+  const exists = await fs
+    .stat(src)
+    .then((s) => s.isFile())
+    .catch(() => false)
+  if (!exists) {
+    return { ok: false, text: `[memory] not found: ${cleanName}` }
+  }
+  await fs.mkdir(scope.notesDir, { recursive: true })
+  await fs.rename(src, dest)
+  const relpath = path.relative(scope.vaultRoot, dest)
+  await VaultGit.ensureAndCommit(
+    scope.vaultRoot,
+    `memory(approve): promoted suggestion ${cleanName} [${relpath}]`,
+  )
+  return { ok: true, text: `[memory] approved → ${relpath}` }
+}
+
+/**
+ * `/memory reject <filename>` — delete a suggested capture from suggested/.
+ * No git commit because the file was never committed in the first place.
+ */
+export async function reject(scope: Scope, filename: string): Promise<CommandResult> {
+  if (!filename.trim()) {
+    return { ok: false, text: "[memory] usage: /memory reject <filename>" }
+  }
+  const cleanName = path.basename(filename.trim())
+  const src = path.join(scope.suggestedDir, cleanName)
+  const exists = await fs
+    .stat(src)
+    .then((s) => s.isFile())
+    .catch(() => false)
+  if (!exists) {
+    return { ok: false, text: `[memory] not found: ${cleanName}` }
+  }
+  await fs.unlink(src)
+  return { ok: true, text: `[memory] rejected ${cleanName}` }
 }
 
 /**

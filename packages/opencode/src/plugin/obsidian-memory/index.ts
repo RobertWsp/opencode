@@ -2,12 +2,15 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Log } from "../../util/log"
 import { CaptureGate, type CaptureEventInput } from "./capture-gate"
 import * as Commands from "./commands"
-import { consolidate } from "./consolidator"
 import { formatBlock, type RefHealthMap } from "./injector"
 import { logEntry } from "./injection-log"
 import { verifyDocRefs } from "./refs"
+import { detectGitEvent, toCaptureEvent } from "./git-event-detector"
+import { computePageRank, seedsFromPrompt } from "./pagerank"
+import { noteSessionIdle, runReflection } from "./reflection-scheduler"
+import { expandQueryHyde, rankMemories } from "./retrieval"
 import { detectScope } from "./scope"
-import type { MemoryConfig, Scope } from "./types"
+import type { MemoryConfig, Scope, VaultDocs } from "./types"
 import { fingerprint, loadAll } from "./vault"
 
 const log = Log.create({ service: "plugin.obsidian-memory" })
@@ -31,6 +34,62 @@ interface CacheEntry {
 function replaceParts(output: { parts: Array<{ type: string; text?: string }> }, text: string): void {
   output.parts.length = 0
   output.parts.push({ type: "text", text })
+}
+
+/** Deterministic short hash used only as a cache key segment. */
+function shortHash(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  }
+  return (h >>> 0).toString(16).padStart(8, "0")
+}
+
+/**
+ * When smart retrieval is enabled, rank the notes by the composed scorer
+ * (optionally with HyDE expansion) and return a new VaultDocs with the
+ * notes array reordered. Shared memories (system/repo/branch) always stay
+ * because they are scope-level by definition.
+ */
+async function maybeRank(
+  scope: Scope,
+  userPrompt: string,
+  docs: VaultDocs,
+  cfg: MemoryConfig,
+): Promise<VaultDocs> {
+  if (!cfg.smartRetrieval || docs.notes.length === 0) return docs
+  const query = cfg.hydeExpansion
+    ? await expandQueryHyde(userPrompt, cfg.captureModel).catch(() => userPrompt)
+    : userPrompt
+  if (!query.trim()) return docs
+  try {
+    // Compute PageRank scores for graph-aware ranking
+    const pageRankResult = await computePageRank(scope, {
+      queryTokens: seedsFromPrompt(query),
+    }).catch(() => null)
+    const pagerankScores = pageRankResult?.scores
+
+    const ranked = await rankMemories(scope, query, {
+      limit: cfg.maxNotes,
+      useFts5: true,
+      pagerankScores,
+    })
+    // Preserve ordering relative to the ranked list but keep only notes
+    // that were in the original `notes` array (shared docs are untouched).
+    const notesByPath = new Map(docs.notes.map((n) => [n.path, n]))
+    const reordered = ranked
+      .map((r) => notesByPath.get(r.entry.doc.path))
+      .filter((n): n is NonNullable<typeof n> => n !== undefined)
+    // Fallback: include any note that did not appear in ranked (rare — when
+    // the index is out of sync)
+    for (const note of docs.notes) {
+      if (!ranked.some((r) => r.entry.doc.path === note.path)) reordered.push(note)
+    }
+    return { ...docs, notes: reordered }
+  } catch (err) {
+    log.debug("smart retrieval failed, falling back to mtime", { error: String(err) })
+    return docs
+  }
 }
 
 /**
@@ -70,10 +129,12 @@ async function buildRefHealthMap(
 export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   log.info("loading plugin")
 
-  // Per-scope cache, keyed by `repoSlug::branchSlug`.
+  // Per-scope cache, keyed by `repoSlug::branchSlug::queryHash`.
   const cache = new Map<string, CacheEntry>()
   let cfgRef: MemoryConfig | undefined
   let captureGate: CaptureGate | undefined
+  // Remember last user prompt per session so injection can use it for ranking.
+  const lastPrompt = new Map<string, string>()
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
@@ -101,6 +162,9 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         autoConsolidate: anyCfg.memory.autoConsolidate ?? false,
         consolidateModel: anyCfg.memory.consolidateModel ?? DEFAULT_CONSOLIDATE_MODEL,
         injectionStyle: anyCfg.memory.injectionStyle ?? "full",
+        smartRetrieval: anyCfg.memory.smartRetrieval ?? false,
+        hydeExpansion: anyCfg.memory.hydeExpansion ?? false,
+        suggestThreshold: anyCfg.memory.suggestThreshold ?? 0,
       }
       anyCfg.command ??= {}
       if (!anyCfg.command["memory"]) {
@@ -114,9 +178,13 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         captureGate = new CaptureGate({
           enabled: true,
           model: cfgRef.captureModel,
+          suggestThreshold: cfgRef.suggestThreshold,
           scopeResolver: async () => resolveScope(),
         })
-        log.info("auto-capture enabled", { model: cfgRef.captureModel })
+        log.info("auto-capture enabled", {
+          model: cfgRef.captureModel,
+          suggestThreshold: cfgRef.suggestThreshold,
+        })
       }
     },
 
@@ -151,7 +219,14 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         else if (verb === "list") result = await Commands.list(scope)
         else if (verb === "show") result = await Commands.show(scope, rest)
         else if (verb === "stats") result = await Commands.stats(scope)
-        else result = { ok: false, text: `[memory] unknown verb "${verb}". use save|list|show|stats` }
+        else if (verb === "suggested") result = await Commands.suggested(scope)
+        else if (verb === "approve") result = await Commands.approve(scope, rest)
+        else if (verb === "reject") result = await Commands.reject(scope, rest)
+        else
+          result = {
+            ok: false,
+            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject`,
+          }
       } catch (err) {
         result = { ok: false, text: `[memory] error: ${err instanceof Error ? err.message : String(err)}` }
       }
@@ -176,7 +251,9 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         return
       }
 
-      const cacheKey = `${scope.repoSlug}::${scope.branchSlug}`
+      const userPrompt = hookInput.sessionID ? lastPrompt.get(hookInput.sessionID) ?? "" : ""
+      const queryHash = userPrompt ? shortHash(userPrompt) : "none"
+      const cacheKey = `${scope.repoSlug}::${scope.branchSlug}::${queryHash}`
       const fp = await fingerprint(scope)
       const cached = cache.get(cacheKey)
       const now = Date.now()
@@ -188,10 +265,11 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         wasCached = true
       } else {
         const docs = await loadAll(scope, cfgRef.maxNotes)
-        const refHealth = await buildRefHealthMap(input.worktree, docs)
+        const rankedDocs = await maybeRank(scope, userPrompt, docs, cfgRef)
+        const refHealth = await buildRefHealthMap(input.worktree, rankedDocs)
         block = formatBlock(
           scope,
-          docs,
+          rankedDocs,
           { maxBytes: cfgRef.maxBytes },
           refHealth,
           cfgRef.injectionStyle,
@@ -202,15 +280,17 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       if (!block) return
       hookOutput.system.push(block)
       log.info("memory injected", {
-        scope: cacheKey,
+        scope: `${scope.repoSlug}::${scope.branchSlug}`,
         bytes: block.length,
         fingerprint: fp.slice(0, 8),
+        smart: cfgRef.smartRetrieval,
+        hyde: cfgRef.hydeExpansion,
       })
       logEntry({
         kind: "inject",
         ts: Date.now(),
         sessionID: hookInput.sessionID ?? "",
-        scope: cacheKey,
+        scope: `${scope.repoSlug}::${scope.branchSlug}`,
         bytes: block.length,
         fingerprint: fp.slice(0, 8),
         cached: wasCached,
@@ -219,14 +299,17 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
     },
 
     async "chat.message"(hookInput, hookOutput) {
-      if (!captureGate) return
       const parts = (hookOutput as unknown as { parts?: Array<{ type: string; text?: string }> }).parts
       const promptText = (parts ?? [])
         .filter((p) => p.type === "text" && typeof p.text === "string")
         .map((p) => p.text as string)
         .join("\n")
         .trim()
-      if (promptText) captureGate.noteUserPrompt(hookInput.sessionID, promptText)
+      if (!promptText) return
+      // Remember for the next system-prompt-transform call so retrieval
+      // can score against the user's actual question.
+      lastPrompt.set(hookInput.sessionID, promptText)
+      if (captureGate) captureGate.noteUserPrompt(hookInput.sessionID, promptText)
     },
 
     async "tool.execute.after"(hookInput, hookOutput) {
@@ -244,6 +327,23 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         timestamp: Date.now(),
       }
       captureGate.enqueue(ev)
+
+      // Git event enrichment: when the agent runs `git <subcommand>` via
+      // bash, surface it as an additional high-signal capture event so
+      // the Haiku gate can decide whether it deserves a timeline memory.
+      if (hookInput.tool === "bash") {
+        const args = (hookInput as unknown as { args?: { command?: string } }).args
+        const command = args?.command
+        if (typeof command === "string") {
+          const candidate = detectGitEvent(
+            command,
+            typeof hookOutput.output === "string" ? hookOutput.output : undefined,
+          )
+          if (candidate) {
+            captureGate.enqueue(toCaptureEvent(candidate, hookInput.sessionID))
+          }
+        }
+      }
     },
 
     async event({ event }: { event: { type: string; properties?: unknown } }) {
@@ -257,11 +357,16 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           if (cfgRef?.autoConsolidate) {
             const scope = await resolveScope()
             if (scope) {
-              consolidate(scope, {
+              // Track session idle for the reflection gate
+              noteSessionIdle(scope)
+              // Run reflection in an isolated git worktree (when gate opens)
+              runReflection(scope, {
                 model: cfgRef.consolidateModel,
+                minHoursSinceLast: 24,
+                minSessionsSinceLast: 5,
                 minNotesToTrigger: 5,
                 maxNotesPerRun: 20,
-              }).catch((err) => log.warn("consolidate failed", { error: String(err) }))
+              }).catch((err) => log.warn("reflection failed", { error: String(err) }))
             }
           }
         }

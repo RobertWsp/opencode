@@ -5,6 +5,38 @@
  * the plugin) to import types without pulling in runtime code.
  */
 
+/**
+ * Taxonomy of memory entries. Adopted from LangMem / Voyager research
+ * where separation between episodic / procedural / factual / decision
+ * categories measurably improves retrieval quality.
+ *
+ * - `fact`: stable truth about the codebase ("API uses bearer auth")
+ * - `decision`: architectural choice with rationale ("picked Zustand over Redux because X")
+ * - `gotcha`: non-obvious bug or surprise ("build fails when X because Y")
+ * - `skill`: procedural how-to ("how to run integration tests")
+ * - `episode`: time-bound event ("on 2026-04-12 refactored auth module")
+ * - `convention`: style/format rule ("always use kebab-case for CSS classes")
+ */
+export type MemoryKind = "fact" | "decision" | "gotcha" | "skill" | "episode" | "convention"
+
+export const MEMORY_KINDS: readonly MemoryKind[] = [
+  "fact",
+  "decision",
+  "gotcha",
+  "skill",
+  "episode",
+  "convention",
+] as const
+
+export function isMemoryKind(value: string): value is MemoryKind {
+  return (MEMORY_KINDS as readonly string[]).includes(value)
+}
+
+export function coerceMemoryKind(value: string | undefined): MemoryKind {
+  if (value && isMemoryKind(value)) return value
+  return "fact"
+}
+
 export interface MemoryConfig {
   enabled: boolean
   vaultPath?: string
@@ -25,6 +57,30 @@ export interface MemoryConfig {
    *   uses the `memory show` command to read full bodies on demand (~300-800B)
    */
   injectionStyle: "full" | "index"
+
+  /**
+   * When true, ranks injected notes via the composed retrieval scorer
+   * (recency + importance + relevance + pagerank) instead of plain mtime
+   * ordering. Requires no extra calls when HyDE is disabled — the scoring
+   * is done against local BM25 / token jaccard.
+   */
+  smartRetrieval: boolean
+
+  /**
+   * When true, runs a Haiku HyDE query expansion before retrieval scoring.
+   * Improves relevance when user prompts use different vocabulary than the
+   * vault (e.g. "auth is broken" vs "JWT middleware rejects expired tokens").
+   * Costs ~$0.0001 per injection, cached 5min.
+   */
+  hydeExpansion: boolean
+
+  /**
+   * When set (>0), captures with importance >= this threshold are held in
+   * a `suggested/` staging area until the user runs `/memory approve` or
+   * `/memory reject`. Lower-importance captures go directly into notes.
+   * Pattern adopted from Cursor's sidecar model (Cursor Memories).
+   */
+  suggestThreshold: number
 }
 
 export interface Scope {
@@ -50,6 +106,8 @@ export interface Scope {
   branchSharedPath: string
   /** `<branchDir>/notes` */
   notesDir: string
+  /** `<branchDir>/suggested` — staging area for suggest-mode captures */
+  suggestedDir: string
   /** `<vault>/_system` — cross-repo user memories */
   systemDir: string
   /** `<systemDir>/MEMORY.md` — user preferences + feedback index */
@@ -67,6 +125,31 @@ export interface MemoryDoc {
   mtimeMs: number
   /** File size in bytes */
   size: number
+}
+
+/**
+ * Enriched view of a MemoryDoc with derived fields parsed from frontmatter
+ * and body (kind, importance, links, bitemporal bounds). Built by the vault
+ * loader and consumed by retrieval + injector.
+ */
+export interface MemoryEntry {
+  doc: MemoryDoc
+  kind: MemoryKind
+  title: string
+  description: string
+  tags: string[]
+  /** Outgoing wikilinks `[[foo]]` extracted from body + frontmatter `links` */
+  links: string[]
+  /** Importance score 0-1 from the capture gate (or user-assigned) */
+  importance: number
+  /** ISO timestamp of logical creation (frontmatter `created` or fallback) */
+  created: string
+  /** ISO timestamp when the fact became true (defaults to `created`) */
+  validFrom: string
+  /** ISO timestamp when invalidated; null means still valid */
+  validUntil: string | null
+  /** Wikilink slug of the note that superseded this one */
+  supersededBy: string | null
 }
 
 export interface VaultDocs {

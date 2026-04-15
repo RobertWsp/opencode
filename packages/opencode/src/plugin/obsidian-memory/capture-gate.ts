@@ -1,7 +1,9 @@
 import { Log } from "../../util/log"
+import { selectCandidates } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
-import { writeNote } from "./vault"
-import type { Scope } from "./types"
+import { invalidateNote, rewriteNote, writeNote } from "./vault"
+import type { MemoryKind, Scope } from "./types"
+import { coerceMemoryKind } from "./types"
 
 const log = Log.create({ service: "plugin.obsidian-memory.capture" })
 
@@ -61,15 +63,23 @@ export class CaptureGate {
   private breaker: CircuitBreaker = { consecutiveFailures: 0, pausedUntil: 0 }
   private enabled: boolean
   private model: string
+  private suggestThreshold: number
   private scopeResolver: (sessionID: string) => Promise<Scope | null>
 
   constructor(opts: {
     enabled: boolean
     model: string
     scopeResolver: (sessionID: string) => Promise<Scope | null>
+    /**
+     * Importance threshold above which ADD captures are routed to
+     * `suggested/` for user approval instead of being committed directly.
+     * 0 disables the feature (legacy behavior).
+     */
+    suggestThreshold?: number
   }) {
     this.enabled = opts.enabled
     this.model = opts.model
+    this.suggestThreshold = opts.suggestThreshold ?? 0
     this.scopeResolver = opts.scopeResolver
   }
 
@@ -182,13 +192,29 @@ export class CaptureGate {
     const scope = await this.scopeResolver(sessionID)
     if (!scope) return
 
-    const payload = buildGateUserMessage(batch, userPrompt)
+    // Retrieve similar existing memories as candidates for UPDATE/DELETE
+    const probeText = [
+      userPrompt ?? "",
+      ...batch.map((ev) => ev.summary),
+    ]
+      .filter(Boolean)
+      .join(" ")
+    const candidates = await selectCandidates(scope, { text: probeText }, { limit: 8 })
+    const indexSnippets = candidates.map((c, i) => ({
+      id: `cand_${i}`,
+      path: c.entry.doc.path,
+      title: c.entry.title,
+      description: c.entry.description,
+      tags: c.entry.tags,
+    }))
+
+    const payload = buildGateUserMessage(batch, userPrompt, indexSnippets)
     const result = await callHaiku({
       model: this.model,
       systemPrompt: GATE_SYSTEM_PROMPT,
       userMessage: payload,
-      maxTokens: 800,
-      timeoutMs: 20_000,
+      maxTokens: 1200,
+      timeoutMs: 25_000,
     })
 
     if (!result.ok) {
@@ -210,39 +236,134 @@ export class CaptureGate {
       })
       return
     }
-    if (!decision.save) {
-      log.info("gate decided not to save", {
+
+    // Resolve candidate reference if present
+    const targetCandidate =
+      decision.targetId && decision.targetId.startsWith("cand_")
+        ? indexSnippets[parseInt(decision.targetId.slice(5), 10)]
+        : null
+
+    try {
+      await this.applyOp(scope, sessionID, decision, targetCandidate, batch.length, result.durationMs)
+    } catch (err) {
+      log.error("gate applyOp failed", {
         sessionID,
-        reason: decision.reason,
-        events: batch.length,
+        op: decision.op,
+        error: String(err),
       })
+    }
+  }
+
+  private async applyOp(
+    scope: Scope,
+    sessionID: string,
+    decision: GateDecision,
+    targetCandidate: { path: string; title: string } | null,
+    eventCount: number,
+    durationMs: number,
+  ): Promise<void> {
+    if (decision.op === "NOOP") {
+      log.info("gate decided NOOP", { sessionID, reason: decision.reason, events: eventCount })
       return
     }
 
-    try {
-      const filepath = await writeNote(scope, {
-        title: decision.title,
-        meta: {
-          "memory-type": "auto-capture",
-          source: "haiku-gate",
-          importance: String(decision.importance ?? ""),
-          tags: decision.tags.join(","),
-          "event-count": String(batch.length),
-        },
-        body: decision.body,
-        commitMessage: `memory(auto): capture "${decision.title}" [gate importance=${decision.importance}]`,
+    if (decision.op === "DELETE") {
+      if (!targetCandidate) {
+        log.info("gate DELETE without valid target — skipping", { sessionID, targetId: decision.targetId })
+        return
+      }
+      const ok = await invalidateNote(scope, targetCandidate.path, {
+        reason: decision.reason || "gate DELETE",
+        supersededBy: decision.supersedes,
+        commitMessage: `memory(invalidate): ${targetCandidate.title} — ${decision.reason || "gate"}`,
       })
-      log.info("gate captured memory", {
-        sessionID,
-        filepath,
-        importance: decision.importance,
-        tags: decision.tags,
-        duration: result.durationMs,
-      })
-    } catch (err) {
-      log.error("gate writeNote failed", { sessionID, error: String(err) })
+      log.info("gate invalidated memory", { sessionID, path: targetCandidate.path, ok, duration: durationMs })
+      return
     }
+
+    if (decision.op === "UPDATE") {
+      if (!targetCandidate) {
+        log.info("gate UPDATE without valid target — falling back to ADD", { sessionID })
+        decision.op = "ADD"
+      } else {
+        const linksBody = renderLinksBlock(decision.links)
+        const fullBody = decision.body + (linksBody ? "\n\n" + linksBody : "")
+        const ok = await rewriteNote(scope, targetCandidate.path, {
+          body: fullBody,
+          meta: {
+            tags: decision.tags.join(","),
+            importance: String(decision.importance ?? 0.5),
+            links: JSON.stringify(decision.links),
+            "memory-kind": decision.kind,
+            "last-merged-count": String(eventCount),
+          },
+          commitMessage: `memory(update): ${targetCandidate.title} [gate importance=${decision.importance}]`,
+        })
+        log.info("gate updated memory", {
+          sessionID,
+          path: targetCandidate.path,
+          ok,
+          importance: decision.importance,
+          kind: decision.kind,
+          links: decision.links.length,
+          duration: durationMs,
+        })
+        return
+      }
+    }
+
+    // ADD (default + fallback from failed UPDATE)
+    const linksBody = renderLinksBlock(decision.links)
+    const fullBody = decision.body + (linksBody ? "\n\n" + linksBody : "")
+
+    // Sidecar "suggest" mode: high-importance captures go to wip/suggested/
+    // without committing, awaiting user approval via /memory approve.
+    const goSuggest =
+      this.suggestThreshold > 0 && decision.importance >= this.suggestThreshold
+    const meta: Record<string, string> = {
+      "memory-type": goSuggest ? "suggested" : "auto-capture",
+      "memory-kind": decision.kind,
+      source: "haiku-gate",
+      importance: String(decision.importance ?? ""),
+      tags: decision.tags.join(","),
+      links: JSON.stringify(decision.links),
+      "event-count": String(eventCount),
+    }
+    if (goSuggest) meta["suggested-at"] = new Date().toISOString()
+
+    const filepath = await writeNote(scope, {
+      title: decision.title,
+      meta,
+      body: fullBody,
+      targetDir: goSuggest ? scope.suggestedDir : scope.notesDir,
+      // No commit when in suggest mode — user decides via approve/reject
+      skipCommit: goSuggest,
+      commitMessage: goSuggest
+        ? undefined
+        : `memory(auto): capture "${decision.title}" [gate importance=${decision.importance}]`,
+    })
+    log.info(goSuggest ? "gate suggested memory" : "gate captured memory", {
+      sessionID,
+      filepath,
+      kind: decision.kind,
+      importance: decision.importance,
+      tags: decision.tags,
+      links: decision.links.length,
+      suggested: goSuggest,
+      duration: durationMs,
+    })
   }
+}
+
+/**
+ * Render a Markdown bullet list of wikilinks for embedding in the body.
+ * Keeps the format consistent so the `parseLinks` reader picks them up
+ * alongside the frontmatter `links` field.
+ */
+function renderLinksBlock(links: string[]): string {
+  if (!links || links.length === 0) return ""
+  const bullets = links.map((link) => `- [[${link}]]`).join("\n")
+  return "## Related\n" + bullets
 }
 
 // ─── heuristic pre-filter ─────────────────────────────────────────────
@@ -270,38 +391,68 @@ function isTrivial(ev: CaptureEventInput): boolean {
 
 // ─── gate prompt ────────────────────────────────────────────────────────
 
-const GATE_SYSTEM_PROMPT = `You are a memory-capture gate for a coding assistant.
+const GATE_SYSTEM_PROMPT = `You are a memory-capture gate for a coding assistant that manages a
+persistent markdown vault (Obsidian-style).
 
-Given a batch of tool events plus the user's latest intent, decide whether
-anything in this batch is worth saving as durable memory for this repository.
-Be conservative: skip anything routine. Save only surprising gotchas,
-non-obvious decisions, or facts that the next session of this assistant
-would benefit from knowing.
+You receive: (1) the user's latest intent, (2) a batch of tool events from
+the current session, and (3) a list of existing CANDIDATE memories that are
+similar to the new batch (retrieved by simple token overlap).
+
+Your job is to choose ONE operation:
+
+- "ADD"    — none of the candidates match; create a new memory
+- "UPDATE" — a candidate covers the same topic; merge the new info in-place
+- "DELETE" — a candidate is now contradicted / obsolete and should be marked invalid
+- "NOOP"   — nothing here is worth remembering (be conservative)
+
+Be AGGRESSIVE with NOOP. Only save surprising gotchas, non-obvious decisions,
+procedural skills (how-to), or facts the next session would clearly benefit
+from knowing. Skip routine file reads, greps, normal edits.
+
+For ADD and UPDATE, you MUST enumerate 2-5 wikilinks to related candidates
+(use their "title" field) so the vault becomes a connected graph.
+
+Categorize "kind" as one of: fact, decision, gotcha, skill, episode, convention.
 
 Output STRICTLY valid JSON matching this shape, no markdown fences, no prose:
 
 {
-  "save": boolean,
-  "reason": "one-line why-or-why-not",
-  "title": "short kebab-ish title (only if save=true)",
-  "body": "multi-line markdown (only if save=true, <= 40 lines, can cite paths)",
+  "op": "ADD" | "UPDATE" | "DELETE" | "NOOP",
+  "reason": "one-line why",
+  "targetId": "cand_0" | "cand_1" | ... (only if UPDATE or DELETE),
+  "kind": "fact",
+  "title": "short kebab-ish title (ADD/UPDATE)",
+  "body": "markdown body <= 40 lines (ADD/UPDATE, cite code paths)",
   "tags": ["tag1", "tag2"],
-  "importance": 0.0
+  "links": ["candidate title 1", "candidate title 2"],
+  "supersedes": "candidate title" (only DELETE, optional),
+  "importance": 0.7
 }
 
-When save=false, only "save" and "reason" are required.
+When op=NOOP, only "op" and "reason" are required.
 
-Importance scale: 0.1 = minor note, 0.5 = useful context, 0.9 = critical gotcha.`
+Importance scale: 0.1 = trivial, 0.5 = useful context, 0.9 = critical gotcha.`
 
 function buildGateUserMessage(
   batch: CaptureEventInput[],
   userPrompt: string | undefined,
+  candidates: Array<{ id: string; title: string; description: string; tags: string[] }>,
 ): string {
   const parts: string[] = []
   if (userPrompt) {
     parts.push(`User's last intent:\n${userPrompt}`)
     parts.push("")
   }
+
+  if (candidates.length > 0) {
+    parts.push(`Existing candidates (${candidates.length}) — prefer UPDATE/DELETE over ADD if one matches:`)
+    for (const c of candidates) {
+      const tags = c.tags.length > 0 ? ` #${c.tags.join(" #")}` : ""
+      parts.push(`- ${c.id}: "${c.title}" — ${c.description}${tags}`)
+    }
+    parts.push("")
+  }
+
   parts.push(`Tool events (${batch.length}):`)
   for (const ev of batch) {
     const details = ev.details ? ` [${JSON.stringify(ev.details).slice(0, 200)}]` : ""
@@ -311,11 +462,15 @@ function buildGateUserMessage(
 }
 
 export interface GateDecision {
-  save: boolean
+  op: "ADD" | "UPDATE" | "DELETE" | "NOOP"
   reason: string
+  targetId?: string
+  kind: MemoryKind
   title: string
   body: string
   tags: string[]
+  links: string[]
+  supersedes?: string
   importance: number
 }
 
@@ -328,15 +483,34 @@ export function parseGateResponse(raw: string): GateDecision | null {
     .replace(/\s*```$/, "")
     .trim()
   try {
-    const parsed = JSON.parse(cleaned) as Partial<GateDecision>
-    if (typeof parsed.save !== "boolean") return null
+    const parsed = JSON.parse(cleaned) as Partial<GateDecision> & {
+      save?: boolean
+    }
+
+    // Back-compat: old "save: bool" → ADD/NOOP
+    let op = parsed.op
+    if (!op && typeof parsed.save === "boolean") {
+      op = parsed.save ? "ADD" : "NOOP"
+    }
+    if (op !== "ADD" && op !== "UPDATE" && op !== "DELETE" && op !== "NOOP") {
+      return null
+    }
+
     return {
-      save: parsed.save,
+      op,
       reason: typeof parsed.reason === "string" ? parsed.reason : "",
+      targetId: typeof parsed.targetId === "string" ? parsed.targetId : undefined,
+      kind: coerceMemoryKind(typeof parsed.kind === "string" ? parsed.kind : undefined),
       title: typeof parsed.title === "string" ? parsed.title : "",
       body: typeof parsed.body === "string" ? parsed.body : "",
-      tags: Array.isArray(parsed.tags) ? (parsed.tags as string[]).filter((t) => typeof t === "string") : [],
-      importance: typeof parsed.importance === "number" ? parsed.importance : 0,
+      tags: Array.isArray(parsed.tags)
+        ? (parsed.tags as string[]).filter((t) => typeof t === "string")
+        : [],
+      links: Array.isArray(parsed.links)
+        ? (parsed.links as string[]).filter((l) => typeof l === "string")
+        : [],
+      supersedes: typeof parsed.supersedes === "string" ? parsed.supersedes : undefined,
+      importance: typeof parsed.importance === "number" ? parsed.importance : 0.5,
     }
   } catch {
     return null

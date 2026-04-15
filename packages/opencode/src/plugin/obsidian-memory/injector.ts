@@ -1,7 +1,17 @@
 import { createHash } from "crypto"
 import path from "path"
+import { isValidAt, toEntry } from "./parse-entry"
 import type { DocRefHealth } from "./refs"
 import type { InjectorOptions, MemoryDoc, Scope, VaultDocs } from "./types"
+
+/**
+ * True if the doc should be excluded from injection because it has been
+ * invalidated (bitemporal soft-delete via valid_until).
+ */
+function isInvalidated(doc: MemoryDoc | undefined): boolean {
+  if (!doc) return false
+  return !isValidAt(toEntry(doc))
+}
 
 /**
  * Map of doc path → ref health, supplied by the caller. When provided,
@@ -38,6 +48,7 @@ export function formatBlock(
 
   const renderShared = (doc: MemoryDoc | undefined): string | null => {
     if (!doc || !doc.body.trim()) return null
+    if (isInvalidated(doc)) return null
     const health = refHealth?.get(doc.path)
     if (health?.allBroken) return null
     const prefix = health && health.brokenCount > 0 ? "<stale-refs>\n" : ""
@@ -55,8 +66,9 @@ export function formatBlock(
   const branchBody = renderShared(docs.branchShared)
   if (branchBody) sections.push(`## Shared (branch: ${scope.branchSlug})\n${branchBody}`)
 
-  // Drop notes whose refs are all broken before truncating
+  // Drop notes whose refs are all broken OR have been invalidated
   const validNotes = docs.notes.filter((n) => {
+    if (isInvalidated(n)) return false
     const health = refHealth?.get(n.path)
     return !health?.allBroken
   })
@@ -154,6 +166,7 @@ function formatIndexBlock(
 
   const pushShared = (label: string, doc: MemoryDoc | undefined) => {
     if (!doc) return
+    if (isInvalidated(doc)) return
     const h = refHealth?.get(doc.path)
     if (h?.allBroken) return
     const title = doc.meta["title"] || label
@@ -168,8 +181,10 @@ function formatIndexBlock(
   pushShared("repo", docs.repoShared)
   pushShared(`branch:${scope.branchSlug}`, docs.branchShared)
 
-  // Notes: compact one-liners per note
-  const validNotes = docs.notes.filter((n) => !refHealth?.get(n.path)?.allBroken)
+  // Notes: compact one-liners per note (skip invalidated + all-broken)
+  const validNotes = docs.notes.filter(
+    (n) => !isInvalidated(n) && !refHealth?.get(n.path)?.allBroken,
+  )
   if (validNotes.length > 0) {
     lines.push("")
     lines.push("recent-notes:")

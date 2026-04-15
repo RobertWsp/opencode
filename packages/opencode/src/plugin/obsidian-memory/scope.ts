@@ -68,6 +68,7 @@ export async function detectScope(opts: {
       branchDir,
       branchSharedPath: path.join(branchDir, "MEMORY.md"),
       notesDir: path.join(branchDir, "notes"),
+      suggestedDir: path.join(branchDir, "suggested"),
       systemDir,
       systemSharedPath: path.join(systemDir, "MEMORY.md"),
     }

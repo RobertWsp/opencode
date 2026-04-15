@@ -29,6 +29,7 @@ async function makeVaultScope() {
     branchDir,
     branchSharedPath: path.join(branchDir, "MEMORY.md"),
     notesDir,
+    suggestedDir: path.join(branchDir, "suggested"),
     systemDir,
     systemSharedPath: path.join(systemDir, "MEMORY.md"),
   }

@@ -1048,6 +1048,26 @@ export namespace Config {
             .describe(
               "Injection format: 'full' embeds memory bodies; 'index' emits a compact listing and the LLM reads bodies on demand via /memory show",
             ),
+          smartRetrieval: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Rank injected notes by composed score (recency + importance + relevance + pagerank) instead of plain mtime ordering",
+            ),
+          hydeExpansion: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Run Haiku HyDE query expansion before retrieval scoring to improve relevance when user prompts use different vocabulary than vault notes",
+            ),
+          suggestThreshold: z
+            .number()
+            .min(0)
+            .max(1)
+            .default(0)
+            .describe(
+              "Importance threshold (0-1). Captures with importance >= this value go to a suggested/ staging area awaiting user approval via /memory approve instead of auto-committing. 0 disables the feature.",
+            ),
         })
         .optional()
         .describe("Obsidian-backed memory plugin configuration"),
