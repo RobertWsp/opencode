@@ -15,6 +15,8 @@ function makeScope(overrides: Partial<Scope> = {}): Scope {
     branchDir: "/tmp/vault/opencode/repos/test-abc123/branches/main",
     branchSharedPath: "/tmp/vault/opencode/repos/test-abc123/branches/main/MEMORY.md",
     notesDir: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes",
+    systemDir: "/tmp/vault/_system",
+    systemSharedPath: "/tmp/vault/_system/MEMORY.md",
     ...overrides,
   }
 }
@@ -181,5 +183,170 @@ describe("formatBlock", () => {
     expect(block).toContain("## Shared (repo)")
     expect(block).toContain("## Shared (branch:")
     expect(block).toContain("## Recent Notes")
+  })
+
+  test("renders _system/ layer as User Preferences section first", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        systemShared: makeDoc({ body: "user likes pt-BR" }),
+        repoShared: makeDoc({ body: "repo ctx" }),
+        notes: [],
+      },
+      { maxBytes: 4096 },
+    )
+    expect(block).toContain("## User Preferences")
+    expect(block).toContain("user likes pt-BR")
+    // User Preferences must come before repo
+    const userIdx = block.indexOf("## User Preferences")
+    const repoIdx = block.indexOf("## Shared (repo)")
+    expect(userIdx).toBeGreaterThan(-1)
+    expect(repoIdx).toBeGreaterThan(-1)
+    expect(userIdx).toBeLessThan(repoIdx)
+  })
+
+  test("systemShared alone still produces a block", () => {
+    const block = formatBlock(
+      makeScope(),
+      { systemShared: makeDoc({ body: "just prefs" }), notes: [] },
+      { maxBytes: 4096 },
+    )
+    expect(block).toContain("<memory-block")
+    expect(block).toContain("just prefs")
+  })
+})
+
+describe("formatBlock index style", () => {
+  test("emits <memory-index> wrapper instead of <memory-block>", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        repoShared: makeDoc({
+          body: "repo body",
+          meta: { title: "Repo Context", description: "Core architecture notes" },
+          path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+        }),
+        notes: [],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "index",
+    )
+    expect(block).toContain("<memory-index")
+    expect(block).not.toContain("<memory-block")
+  })
+
+  test("index entries show title and description, not full body", () => {
+    const block = formatBlock(
+      makeScope(),
+      {
+        repoShared: makeDoc({
+          body: "full repo body with lots of\ndetails that should NOT appear",
+          meta: { title: "Repo Context", description: "Short summary" },
+          path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+        }),
+        notes: [
+          makeDoc({
+            body: "long note body that should also not appear in index",
+            meta: {
+              title: "gotcha-1",
+              description: "One liner",
+              created: "2026-04-15T12:00:00Z",
+            },
+            path: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes/a.md",
+          }),
+        ],
+      },
+      { maxBytes: 4096 },
+      undefined,
+      "index",
+    )
+    expect(block).toContain("Repo Context")
+    expect(block).toContain("Short summary")
+    expect(block).toContain("gotcha-1")
+    expect(block).toContain("One liner")
+    // Bodies must NOT be embedded
+    expect(block).not.toContain("full repo body with lots of")
+    expect(block).not.toContain("long note body")
+  })
+
+  test("index is meaningfully smaller than full for same input", () => {
+    const bigBody = "x".repeat(500)
+    const docs = {
+      repoShared: makeDoc({
+        body: bigBody,
+        meta: { title: "T", description: "D" },
+        path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+      }),
+      notes: Array.from({ length: 5 }, (_, i) =>
+        makeDoc({
+          body: bigBody,
+          meta: { title: `n${i}`, description: "d", created: "2026-04-15T00:00:00Z" },
+          path: `/tmp/vault/opencode/repos/test-abc123/branches/main/notes/${i}.md`,
+        }),
+      ),
+    }
+    const full = formatBlock(makeScope(), docs, { maxBytes: 10000 }, undefined, "full")
+    const index = formatBlock(makeScope(), docs, { maxBytes: 10000 }, undefined, "index")
+    expect(index.length).toBeLessThan(full.length / 3)
+  })
+
+  test("index truncates by dropping oldest notes when over budget", () => {
+    const docs = {
+      notes: Array.from({ length: 30 }, (_, i) =>
+        makeDoc({
+          body: "body",
+          meta: {
+            title: `note-${String(i).padStart(2, "0")}`,
+            description: "one",
+            created: `2026-04-${String((i % 28) + 1).padStart(2, "0")}T00:00:00Z`,
+          },
+          path: `/tmp/vault/opencode/repos/test-abc123/branches/main/notes/${i}.md`,
+          mtimeMs: 1000 - i,
+        }),
+      ),
+    }
+    const smallBudget = formatBlock(makeScope(), docs, { maxBytes: 600 }, undefined, "index")
+    const bigBudget = formatBlock(makeScope(), docs, { maxBytes: 10000 }, undefined, "index")
+    expect(smallBudget.length).toBeLessThanOrEqual(700) // small slack for wrapper
+    expect(bigBudget.length).toBeGreaterThan(smallBudget.length)
+  })
+
+  test("index includes Use /memory show hint", () => {
+    const block = formatBlock(
+      makeScope(),
+      { repoShared: makeDoc({ body: "x", meta: { title: "T" }, path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md" }), notes: [] },
+      { maxBytes: 4096 },
+      undefined,
+      "index",
+    )
+    expect(block).toContain("Use /memory show")
+  })
+
+  test("index hides fully-stale memories", () => {
+    const doc = makeDoc({
+      body: "x",
+      meta: { title: "T" },
+      path: "/tmp/vault/opencode/repos/test-abc123/MEMORY.md",
+    })
+    const refHealth = new Map([
+      [
+        doc.path,
+        {
+          refs: [],
+          anyValid: false,
+          allBroken: true,
+          brokenCount: 1,
+        },
+      ],
+    ])
+    const block = formatBlock(
+      makeScope(),
+      { repoShared: doc, notes: [] },
+      { maxBytes: 4096 },
+      refHealth,
+      "index",
+    )
+    expect(block).toBe("")
   })
 })

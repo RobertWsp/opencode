@@ -3,7 +3,12 @@ import { promises as fs } from "fs"
 import os from "os"
 import path from "path"
 import { $ } from "bun"
-import { detectScope } from "../../../src/plugin/obsidian-memory/scope"
+import {
+  canonicalizeLocal,
+  canonicalizeRemote,
+  deriveBasename,
+  detectScope,
+} from "../../../src/plugin/obsidian-memory/scope"
 
 async function makeRepo(opts: { remote?: string; branch?: string; detached?: boolean }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omem-scope-"))
@@ -118,6 +123,31 @@ describe("detectScope", () => {
     const dir = await track(makeRepo({ remote: "git@github.com:foo/bar.git" }))
     const result = await detectScope({ worktree: dir, vaultPath: "~/test-vault" })
     expect(result!.vaultRoot).toBe(path.join(os.homedir(), "test-vault"))
+  })
+
+  test("SSH and HTTPS variants of the same repo produce identical shortHash", async () => {
+    const dir1 = await track(makeRepo({ remote: "git@github.com:owner/repo.git" }))
+    const dir2 = await track(makeRepo({ remote: "https://github.com/owner/repo.git" }))
+    const r1 = await detectScope({ worktree: dir1, vaultPath: "/tmp/vault" })
+    const r2 = await detectScope({ worktree: dir2, vaultPath: "/tmp/vault" })
+    expect(r1!.shortHash).toBe(r2!.shortHash)
+    expect(r1!.repoSlug).toBe(r2!.repoSlug)
+  })
+
+  test("with and without .git suffix produce identical shortHash", async () => {
+    const dir1 = await track(makeRepo({ remote: "https://github.com/owner/repo.git" }))
+    const dir2 = await track(makeRepo({ remote: "https://github.com/owner/repo" }))
+    const r1 = await detectScope({ worktree: dir1, vaultPath: "/tmp/vault" })
+    const r2 = await detectScope({ worktree: dir2, vaultPath: "/tmp/vault" })
+    expect(r1!.shortHash).toBe(r2!.shortHash)
+  })
+
+  test("credentials in URL do not affect hash", async () => {
+    const dir1 = await track(makeRepo({ remote: "https://github.com/owner/repo.git" }))
+    const dir2 = await track(makeRepo({ remote: "https://user:token@github.com/owner/repo.git" }))
+    const r1 = await detectScope({ worktree: dir1, vaultPath: "/tmp/vault" })
+    const r2 = await detectScope({ worktree: dir2, vaultPath: "/tmp/vault" })
+    expect(r1!.shortHash).toBe(r2!.shortHash)
   })
 
   test("builds filesystem paths correctly", async () => {

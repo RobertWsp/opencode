@@ -1,4 +1,5 @@
 import { createHash } from "crypto"
+import { realpathSync } from "fs"
 import os from "os"
 import path from "path"
 import { git } from "../../util/git"
@@ -31,11 +32,13 @@ export async function detectScope(opts: {
     const topLevel = topLevelRes.text().trim() || cwd
     const branchRaw = branchRes.exitCode === 0 ? branchRes.text().trim() : ""
 
-    const identity = remote || topLevel
+    // Canonical identity: normalize remote URL so all forms of the same repo
+    // (ssh, https, with/without .git) produce the same hash. Falls back to
+    // realpath-resolved topLevel for repos without a remote.
+    const identity = canonicalizeRemote(remote) || canonicalizeLocal(topLevel)
     if (!identity) return null
 
-    const basenameSource = remote ? remote.replace(/\.git$/, "") : topLevel
-    const basename = slugify(path.basename(basenameSource)) || "repo"
+    const basename = deriveBasename(identity)
     const shortHash = createHash("sha256").update(identity).digest("hex").slice(0, 6)
     const repoSlug = `${basename}-${shortHash}`
 
@@ -51,6 +54,7 @@ export async function detectScope(opts: {
     const vaultRoot = expandTilde(opts.vaultPath)
     const repoDir = path.join(vaultRoot, "opencode", "repos", repoSlug)
     const branchDir = path.join(repoDir, "branches", branchSlug)
+    const systemDir = path.join(vaultRoot, "_system")
 
     return {
       vaultRoot,
@@ -64,6 +68,8 @@ export async function detectScope(opts: {
       branchDir,
       branchSharedPath: path.join(branchDir, "MEMORY.md"),
       notesDir: path.join(branchDir, "notes"),
+      systemDir,
+      systemSharedPath: path.join(systemDir, "MEMORY.md"),
     }
   } catch {
     return null
@@ -75,6 +81,70 @@ function slugify(s: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
+}
+
+/**
+ * Normalize a git remote URL into a canonical `host/owner/name` form so that
+ * all protocols and variants of the same repository produce identical hashes.
+ *
+ * Handles:
+ * - `git@host:owner/repo.git`      → `host/owner/repo`
+ * - `ssh://git@host/owner/repo.git`→ `host/owner/repo`
+ * - `https://host/owner/repo.git`  → `host/owner/repo`
+ * - `https://user:token@host/a/b`  → `host/a/b`    (drops credentials)
+ * - `file:///path/to/repo`         → `path/to/repo`
+ *
+ * Returns empty string if input is empty or unparseable.
+ */
+export function canonicalizeRemote(remote: string): string {
+  const trimmed = remote.trim()
+  if (!trimmed) return ""
+
+  // Drop trailing .git and trailing slashes
+  const stripped = trimmed.replace(/\.git\/?$/, "").replace(/\/+$/, "")
+
+  // scp-like syntax: git@host:owner/repo (no protocol)
+  const scpMatch = stripped.match(/^(?:[^@/:]+@)?([^:/]+):(.+)$/)
+  if (scpMatch && !stripped.startsWith("http") && !stripped.includes("://")) {
+    const host = scpMatch[1].toLowerCase()
+    const pathPart = scpMatch[2].replace(/^\/+/, "")
+    return `${host}/${pathPart}`
+  }
+
+  // URL-like: protocol://[user[:pass]@]host[:port]/path
+  const urlMatch = stripped.match(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i)
+  if (urlMatch) {
+    const host = urlMatch[1].toLowerCase()
+    const pathPart = urlMatch[2].replace(/^\/+/, "")
+    return `${host}/${pathPart}`
+  }
+
+  // Fallback: return as-is (already normalized or unknown form)
+  return stripped.toLowerCase()
+}
+
+/**
+ * Normalize a local worktree path for repos without a remote. Resolves
+ * symlinks so the same repo reached via different paths produces the same
+ * hash. Still machine-specific — a no-remote repo cannot sync across hosts.
+ */
+export function canonicalizeLocal(topLevel: string): string {
+  if (!topLevel) return ""
+  try {
+    return `local:${realpathSync(topLevel)}`
+  } catch {
+    return `local:${path.resolve(topLevel)}`
+  }
+}
+
+/**
+ * Derive a human-readable basename from a canonical identity string.
+ * Uses the last path segment, slugified.
+ */
+export function deriveBasename(identity: string): string {
+  const lastSegment = identity.split("/").filter(Boolean).pop() ?? ""
+  const cleaned = lastSegment.replace(/^local:/, "")
+  return slugify(path.basename(cleaned)) || "repo"
 }
 
 function sanitizeBranch(raw: string): string {

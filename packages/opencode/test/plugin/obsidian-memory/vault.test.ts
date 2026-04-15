@@ -15,6 +15,7 @@ async function makeVaultScope() {
   const repoDir = path.join(vaultRoot, "opencode", "repos", repoSlug)
   const branchDir = path.join(repoDir, "branches", branchSlug)
   const notesDir = path.join(branchDir, "notes")
+  const systemDir = path.join(vaultRoot, "_system")
   await fs.mkdir(notesDir, { recursive: true })
   const scope: Scope = {
     vaultRoot,
@@ -28,6 +29,8 @@ async function makeVaultScope() {
     branchDir,
     branchSharedPath: path.join(branchDir, "MEMORY.md"),
     notesDir,
+    systemDir,
+    systemSharedPath: path.join(systemDir, "MEMORY.md"),
   }
   return scope
 }
@@ -93,6 +96,34 @@ describe("loadAll", () => {
     expect(docs.repoShared?.body).toBe("repo body")
     expect(docs.repoShared?.meta.type).toBe("memory-shared")
     expect(docs.branchShared?.body).toBe("branch body")
+  })
+
+  test("reads _system/ layer when present", async () => {
+    const scope = await makeVaultScope()
+    await fs.mkdir(scope.systemDir, { recursive: true })
+    await fs.writeFile(
+      scope.systemSharedPath,
+      "---\ntype: memory-system\n---\nuser prefers pt-BR",
+    )
+    const docs = await loadAll(scope)
+    expect(docs.systemShared?.body).toBe("user prefers pt-BR")
+    expect(docs.systemShared?.meta.type).toBe("memory-system")
+  })
+
+  test("systemShared is undefined when _system/ does not exist", async () => {
+    const scope = await makeVaultScope()
+    const docs = await loadAll(scope)
+    expect(docs.systemShared).toBeUndefined()
+  })
+
+  test("fingerprint changes when _system/ MEMORY.md is modified", async () => {
+    const scope = await makeVaultScope()
+    const { fingerprint } = await import("../../../src/plugin/obsidian-memory/vault")
+    const fp1 = await fingerprint(scope)
+    await fs.mkdir(scope.systemDir, { recursive: true })
+    await fs.writeFile(scope.systemSharedPath, "# user prefs")
+    const fp2 = await fingerprint(scope)
+    expect(fp1).not.toBe(fp2)
   })
 
   test("sorts notes newest-first by mtime", async () => {

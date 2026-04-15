@@ -1,5 +1,6 @@
 import { promises as fs } from "fs"
 import path from "path"
+import { aggregateStats, readRecent } from "./injection-log"
 import { writeNote } from "./vault"
 import type { Scope } from "./types"
 
@@ -93,6 +94,36 @@ export async function list(scope: Scope): Promise<CommandResult> {
     lines.push("(no memories yet)")
   }
 
+  return { ok: true, text: lines.join("\n") }
+}
+
+/**
+ * `/memory stats` — aggregate counts and latency over the recent injection log.
+ */
+export async function stats(_scope: Scope): Promise<CommandResult> {
+  const entries = await readRecent(500)
+  if (entries.length === 0) {
+    return { ok: true, text: "[memory] no log entries yet" }
+  }
+  const s = aggregateStats(entries)
+  const lines: string[] = []
+  lines.push("[memory] stats (last 500 events)")
+  lines.push(`  injections: ${s.totalInjections}`)
+  lines.push(`  cache hit rate: ${(s.cacheHitRate * 100).toFixed(1)}%`)
+  lines.push(`  avg block size: ${s.avgBytes} bytes`)
+  lines.push(`  captures: ${s.totalCaptures}`)
+  lines.push(`  consolidations: ${s.totalConsolidations}`)
+  if (s.totalConsolidations > 0) {
+    lines.push(
+      `  ops: merge=${s.opCounts.merge} rewrite=${s.opCounts.rewrite} promote=${s.opCounts.promote} delete=${s.opCounts.delete}`,
+    )
+  }
+  if (s.byScope.length > 0) {
+    lines.push("  by scope:")
+    for (const row of s.byScope.slice(0, 5)) {
+      lines.push(`    ${row.scope}: ${row.injections} injections / ${row.captures} captures`)
+    }
+  }
   return { ok: true, text: lines.join("\n") }
 }
 

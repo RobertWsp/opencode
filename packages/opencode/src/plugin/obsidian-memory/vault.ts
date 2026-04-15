@@ -3,6 +3,7 @@ import { promises as fs } from "fs"
 import path from "path"
 import { parseFrontmatter, serializeFrontmatter } from "./frontmatter"
 import type { MemoryDoc, Scope, VaultDocs } from "./types"
+import { VaultGit } from "./vault-git"
 
 /**
  * Deterministic fingerprint of the vault state relevant to a given scope.
@@ -20,7 +21,11 @@ import type { MemoryDoc, Scope, VaultDocs } from "./types"
  */
 export async function fingerprint(scope: Scope): Promise<string> {
   const hash = createHash("sha256")
-  const targets: string[] = [scope.repoSharedPath, scope.branchSharedPath]
+  const targets: string[] = [
+    scope.systemSharedPath,
+    scope.repoSharedPath,
+    scope.branchSharedPath,
+  ]
   try {
     const entries = await fs.readdir(scope.notesDir)
     for (const entry of entries.sort()) {
@@ -50,7 +55,8 @@ export async function fingerprint(scope: Scope): Promise<string> {
  * - Non-`.md` files in the notes dir are skipped.
  */
 export async function loadAll(scope: Scope, maxNotes = 20): Promise<VaultDocs> {
-  const [repoShared, branchShared] = await Promise.all([
+  const [systemShared, repoShared, branchShared] = await Promise.all([
+    loadDoc(scope.systemSharedPath),
     loadDoc(scope.repoSharedPath),
     loadDoc(scope.branchSharedPath),
   ])
@@ -74,6 +80,7 @@ export async function loadAll(scope: Scope, maxNotes = 20): Promise<VaultDocs> {
   }
 
   return {
+    systemShared: systemShared ?? undefined,
     repoShared: repoShared ?? undefined,
     branchShared: branchShared ?? undefined,
     notes: notes.slice(0, maxNotes),
@@ -86,7 +93,15 @@ export async function loadAll(scope: Scope, maxNotes = 20): Promise<VaultDocs> {
  */
 export async function writeNote(
   scope: Scope,
-  input: { title: string; meta?: Record<string, string>; body: string },
+  input: {
+    title: string
+    meta?: Record<string, string>
+    body: string
+    /** Override default commit message; falls back to "save" template */
+    commitMessage?: string
+    /** Skip git commit entirely (used by batch callers that commit themselves) */
+    skipCommit?: boolean
+  },
 ): Promise<string> {
   await fs.mkdir(scope.notesDir, { recursive: true })
   const ts = new Date().toISOString().replace(/[:.]/g, "-")
@@ -108,6 +123,14 @@ export async function writeNote(
   }
   const content = serializeFrontmatter(meta, input.body)
   await fs.writeFile(filepath, content, "utf8")
+
+  if (!input.skipCommit) {
+    const relpath = path.relative(scope.vaultRoot, filepath)
+    const message =
+      input.commitMessage ?? `memory(save): ${input.title || titleSlug} [${relpath}]`
+    await VaultGit.ensureAndCommit(scope.vaultRoot, message)
+  }
+
   return filepath
 }
 

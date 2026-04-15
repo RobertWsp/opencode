@@ -1026,6 +1026,28 @@ export namespace Config {
             .positive()
             .default(20)
             .describe("Maximum recent notes to include when assembling the block"),
+          autoCapture: z
+            .boolean()
+            .default(false)
+            .describe("Enable Haiku-gated automatic capture of tool events"),
+          captureModel: z
+            .string()
+            .default("claude-haiku-4-5-20251001")
+            .describe("Anthropic model ID used by the capture gate"),
+          autoConsolidate: z
+            .boolean()
+            .default(false)
+            .describe("Enable Sonnet-backed consolidation of wip notes on session.idle"),
+          consolidateModel: z
+            .string()
+            .default("claude-sonnet-4-5-20250929")
+            .describe("Anthropic model ID used by the consolidator"),
+          injectionStyle: z
+            .enum(["full", "index"])
+            .default("full")
+            .describe(
+              "Injection format: 'full' embeds memory bodies; 'index' emits a compact listing and the LLM reads bodies on demand via /memory show",
+            ),
         })
         .optional()
         .describe("Obsidian-backed memory plugin configuration"),
