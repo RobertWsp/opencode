@@ -12,7 +12,9 @@ import { isValidAt, toEntry } from "./parse-entry"
 import { expandQueryHyde, rankMemories } from "./retrieval"
 import { detectScope } from "./scope"
 import type { MemoryConfig, MemoryDoc, Scope, VaultDocs } from "./types"
-import { fingerprint, loadAll } from "./vault"
+import { fingerprint, loadAll, writeNote } from "./vault"
+import { buildSummary, formatSummaryNote } from "./session-summary"
+import { runAutoInit, shouldAutoInit } from "./auto-init"
 
 const log = Log.create({ service: "plugin.obsidian-memory" })
 
@@ -194,6 +196,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   const lastPrompt = new Map<string, string>()
   // Track files touched per session for file-aware retrieval boosting.
   const sessionFiles = new Map<string, Set<string>>()
+  const sessionEvents = new Map<string, CaptureEventInput[]>()
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
@@ -225,6 +228,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         smartRetrieval: anyCfg.memory.smartRetrieval ?? false,
         hydeExpansion: anyCfg.memory.hydeExpansion ?? false,
         suggestThreshold: anyCfg.memory.suggestThreshold ?? 0,
+        sessionSummary: anyCfg.memory.sessionSummary ?? false,
       }
       anyCfg.command ??= {}
       if (!anyCfg.command["memory"]) {
@@ -315,6 +319,15 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       if (!scope) {
         log.debug("scope detection failed — skipping injection")
         return
+      }
+
+      if (cfgRef.autoInit) {
+        const needInit = await shouldAutoInit(scope, input.worktree).catch(() => false)
+        if (needInit) {
+          await runAutoInit(scope, input.worktree).catch((err) =>
+            log.warn("auto-init failed", { error: String(err) }),
+          )
+        }
       }
 
       // Get the user prompt for ranking. On the first turn, chat.message may
@@ -439,6 +452,9 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         },
         timestamp: Date.now(),
       }
+      const evList = sessionEvents.get(hookInput.sessionID) ?? []
+      if (evList.length === 0) sessionEvents.set(hookInput.sessionID, evList)
+      evList.push(ev)
       // AWAIT the enqueue — this is critical for `opencode run` single-shot
       // mode where the process exits immediately after session.idle and
       // fire-and-forget timers never run. The gate's internal debounce
@@ -469,8 +485,20 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         const props = event.properties as { sessionID?: string } | undefined
         if (props?.sessionID) {
           await captureGate.flush(props.sessionID).catch(() => undefined)
-          // Chain consolidation after the flush — if auto-consolidate is on
-          // and we just wrote notes, Sonnet decides what to do with them.
+          if (cfgRef?.sessionSummary) {
+            const evs = sessionEvents.get(props.sessionID) ?? []
+            const files = sessionFiles.get(props.sessionID) ?? new Set<string>()
+            const summary = buildSummary(props.sessionID, evs, files)
+            if (summary) {
+              const scope = await resolveScope()
+              if (scope) {
+                const { title, meta, body } = formatSummaryNote(summary)
+                await writeNote(scope, { title, meta, body }).catch((err) =>
+                  log.warn("session summary write failed", { error: String(err) }),
+                )
+              }
+            }
+          }
           if (cfgRef?.autoConsolidate) {
             const scope = await resolveScope()
             if (scope) {
@@ -496,6 +524,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           captureGate.forget(sessionID)
           lastPrompt.delete(sessionID)
           sessionFiles.delete(sessionID)
+          sessionEvents.delete(sessionID)
         }
       } else if (event.type === "session.error") {
         const props = event.properties as

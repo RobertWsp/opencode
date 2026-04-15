@@ -17,7 +17,18 @@
  * - `episode`: time-bound event ("on 2026-04-12 refactored auth module")
  * - `convention`: style/format rule ("always use kebab-case for CSS classes")
  */
-export type MemoryKind = "fact" | "decision" | "gotcha" | "skill" | "episode" | "convention"
+export type MemoryKind =
+  | "fact"
+  | "decision"
+  | "gotcha"
+  | "skill"
+  | "episode"
+  | "convention"
+  | "session-summary"
+  | "learned-pattern"
+  | "architecture"
+  | "tech-context"
+  | "progress"
 
 export const MEMORY_KINDS: readonly MemoryKind[] = [
   "fact",
@@ -26,6 +37,11 @@ export const MEMORY_KINDS: readonly MemoryKind[] = [
   "skill",
   "episode",
   "convention",
+  "session-summary",
+  "learned-pattern",
+  "architecture",
+  "tech-context",
+  "progress",
 ] as const
 
 export function isMemoryKind(value: string): value is MemoryKind {
@@ -81,6 +97,8 @@ export interface MemoryConfig {
    * Pattern adopted from Cursor's sidecar model (Cursor Memories).
    */
   suggestThreshold: number
+  sessionSummary?: boolean
+  autoInit?: boolean
 }
 
 export interface Scope {
