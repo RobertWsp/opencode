@@ -4,6 +4,8 @@ import { callHaiku } from "./haiku-client"
 import { isValidAt } from "./parse-entry"
 import type { MemoryEntry, Scope } from "./types"
 import { VaultIndex, type FtsHit } from "./vault-index"
+import type { VectorStore } from "./vector-store"
+import type { Embedder } from "./embedder"
 
 const log = Log.create({ service: "plugin.obsidian-memory.retrieval" })
 
@@ -252,4 +254,103 @@ export async function expandQueryHyde(
 /** Exposed for tests */
 export function clearHydeCache(): void {
   hydeCache.clear()
+}
+
+export interface HybridWeights {
+  bm25: number
+  vector: number
+  recency: number
+  importance: number
+  pagerank: number
+  boost: number
+}
+
+export const HYBRID_WEIGHTS: HybridWeights = {
+  bm25: 0.25,
+  vector: 0.30,
+  recency: 0.15,
+  importance: 0.10,
+  pagerank: 0.10,
+  boost: 0.10,
+}
+
+export interface HybridRankOptions {
+  limit?: number
+  hybridWeights?: Partial<HybridWeights>
+  recencyHalfLifeDays?: number
+  pagerankScores?: Map<string, number>
+  activeFiles?: Set<string>
+  vectorStore?: VectorStore
+  embedder?: Embedder | null
+  queryVector?: Float32Array
+  useFts5?: boolean
+}
+
+export async function hybridRank(
+  scope: Scope,
+  query: string,
+  opts: HybridRankOptions = {},
+): Promise<RankedEntry[]> {
+  const limit = opts.limit ?? 20
+  const half = opts.recencyHalfLifeDays ?? 30
+  const w = { ...HYBRID_WEIGHTS, ...(opts.hybridWeights ?? {}) }
+  const useFts = opts.useFts5 !== false
+
+  const entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  if (entries.length === 0) return []
+
+  const bm25Map = await computeRelevance(scope, query, entries, useFts)
+
+  const vectorMap = new Map<string, number>()
+  const qv = opts.queryVector ?? (await embedQuery(opts.embedder, query))
+  if (qv && opts.vectorStore) {
+    for (const hit of opts.vectorStore.search(qv, entries.length)) {
+      vectorMap.set(hit.path, Math.max(0, hit.score))
+    }
+  }
+
+  const hasVector = vectorMap.size > 0
+  const effectiveBm25 = hasVector ? w.bm25 : w.bm25 + w.vector
+  const effectiveVector = hasVector ? w.vector : 0
+
+  const now = Date.now()
+  const ranked: RankedEntry[] = entries.map((entry) => {
+    const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
+    const recency = Math.exp(-ageDays / half)
+    const bm25 = bm25Map.get(entry.doc.path) ?? 0
+    const vector = vectorMap.get(entry.doc.path) ?? 0
+    const pagerank = opts.pagerankScores?.get(entry.doc.path) ?? 0
+    const boost = fileBoost(entry, opts.activeFiles)
+    const score =
+      bm25 * effectiveBm25 +
+      vector * effectiveVector +
+      recency * w.recency +
+      entry.importance * w.importance +
+      pagerank * w.pagerank +
+      boost * w.boost
+    return { entry, score, breakdown: { recency, importance: entry.importance, relevance: bm25, pagerank } }
+  })
+
+  ranked.sort((a, b) => b.score - a.score)
+  return ranked.slice(0, limit)
+}
+
+function fileBoost(entry: MemoryEntry, active?: Set<string>): number {
+  if (!active || active.size === 0) return 0
+  const text = entry.doc.body + " " + (entry.doc.meta["refs"] ?? "")
+  for (const file of active) {
+    const base = file.split("/").pop() ?? file
+    if (text.includes(base) || text.includes(file)) return 1
+  }
+  return 0
+}
+
+async function embedQuery(embedder: Embedder | undefined | null, query: string): Promise<Float32Array | null> {
+  if (!embedder || !query.trim()) return null
+  try {
+    const results = await embedder.embed([query], "query")
+    return results[0]?.vector ?? null
+  } catch {
+    return null
+  }
 }

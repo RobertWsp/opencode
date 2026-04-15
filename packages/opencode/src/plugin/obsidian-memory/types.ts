@@ -102,6 +102,7 @@ export interface MemoryConfig {
   embedApiKey?: string
   embedModel?: string
   embedDimensions?: number
+  contradictionDetection?: boolean
 }
 
 export interface Scope {

@@ -1,9 +1,12 @@
 import { Log } from "../../util/log"
+import type { Embedder } from "./embedder"
+import type { VectorStore } from "./vector-store"
 import { loadAllEntries, selectCandidates } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
-import { isValidAt, titleToSlug } from "./parse-entry"
+import { detectContradiction, markSuperseded } from "./contradiction"
+import { isValidAt, titleToSlug, toEntry } from "./parse-entry"
 import { invalidateNote, rewriteNote, writeNote } from "./vault"
-import type { MemoryKind, Scope } from "./types"
+import type { MemoryEntry, MemoryKind, Scope } from "./types"
 import { coerceMemoryKind } from "./types"
 
 const log = Log.create({ service: "plugin.obsidian-memory.capture" })
@@ -70,23 +73,27 @@ export class CaptureGate {
   private enabled: boolean
   private model: string
   private suggestThreshold: number
+  private contradictionDetection: boolean
   private scopeResolver: (sessionID: string) => Promise<Scope | null>
+  private embedder: Embedder | null
+  private getVectorStore: (() => VectorStore | undefined) | undefined
 
   constructor(opts: {
     enabled: boolean
     model: string
     scopeResolver: (sessionID: string) => Promise<Scope | null>
-    /**
-     * Importance threshold above which ADD captures are routed to
-     * `suggested/` for user approval instead of being committed directly.
-     * 0 disables the feature (legacy behavior).
-     */
     suggestThreshold?: number
+    contradictionDetection?: boolean
+    embedder?: Embedder | null
+    getVectorStore?: () => VectorStore | undefined
   }) {
     this.enabled = opts.enabled
     this.model = opts.model
     this.suggestThreshold = opts.suggestThreshold ?? 0
+    this.contradictionDetection = opts.contradictionDetection ?? false
     this.scopeResolver = opts.scopeResolver
+    this.embedder = opts.embedder ?? null
+    this.getVectorStore = opts.getVectorStore
   }
 
   /**
@@ -316,7 +323,7 @@ export class CaptureGate {
     })
 
     try {
-      await this.applyOp(scope, sessionID, decision, targetCandidate, batch, result.durationMs)
+      await this.applyOp(scope, sessionID, decision, targetCandidate, batch, result.durationMs, validEntries)
     } catch (err) {
       log.error("gate applyOp failed", {
         sessionID,
@@ -333,6 +340,7 @@ export class CaptureGate {
     targetCandidate: { path: string; title: string } | null,
     batch: CaptureEventInput[],
     durationMs: number,
+    nearby: MemoryEntry[] = [],
   ): Promise<void> {
     const eventCount = batch.length
 
@@ -440,6 +448,42 @@ export class CaptureGate {
       suggested: goSuggest,
       duration: durationMs,
     })
+
+    const store = this.getVectorStore?.()
+    if (this.embedder && store) {
+      const emb = this.embedder
+      const text = `${decision.title} ${decision.body}`.slice(0, 8000)
+      void emb
+        .embed([text])
+        .then((results) => {
+          const v = results[0]?.vector
+          if (v) store.upsert(filepath, v)
+        })
+        .catch((_err) => {
+          void _err
+        })
+    }
+
+    if (this.contradictionDetection && !goSuggest && nearby.length > 0) {
+      const newDoc = {
+        path: filepath,
+        meta: { title: decision.title, tags: decision.tags.join(","), "memory-kind": decision.kind },
+        body: decision.body,
+        mtimeMs: Date.now(),
+        size: decision.body.length,
+      }
+      const newEntry = toEntry(newDoc)
+      const contra = await detectContradiction(newEntry, nearby)
+      if (contra) {
+        await markSuperseded(contra.path, decision.title)
+        log.info("gate marked superseded", {
+          sessionID,
+          old: contra.path,
+          by: decision.title,
+          sim: contra.similarity,
+        })
+      }
+    }
   }
 }
 

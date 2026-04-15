@@ -9,7 +9,10 @@ import { detectGitEvent, toCaptureEvent } from "./git-event-detector"
 import { computePageRank, seedsFromPrompt } from "./pagerank"
 import { noteSessionIdle, runReflection } from "./reflection-scheduler"
 import { isValidAt, toEntry } from "./parse-entry"
-import { expandQueryHyde, rankMemories } from "./retrieval"
+import { expandQueryHyde, hybridRank, rankMemories } from "./retrieval"
+import { createEmbedder, type Embedder } from "./embedder"
+import { createVectorStore, type VectorStore } from "./vector-store"
+import path from "path"
 import { detectScope } from "./scope"
 import type { MemoryConfig, MemoryDoc, Scope, VaultDocs } from "./types"
 import { fingerprint, loadAll, writeNote } from "./vault"
@@ -94,6 +97,8 @@ async function maybeRank(
   docs: VaultDocs,
   cfg: MemoryConfig,
   activeFiles?: Set<string>,
+  embedder?: Embedder | null,
+  store?: VectorStore,
 ): Promise<VaultDocs> {
   if (!cfg.smartRetrieval || docs.notes.length === 0) return docs
   const query = cfg.hydeExpansion
@@ -107,12 +112,21 @@ async function maybeRank(
     }).catch(() => null)
     const pagerankScores = pageRankResult?.scores
 
-    const ranked = await rankMemories(scope, query, {
-      limit: cfg.maxNotes,
-      useFts5: true,
-      pagerankScores,
-      activeFiles,
-    })
+    const ranked = store
+      ? await hybridRank(scope, query, {
+          limit: cfg.maxNotes,
+          useFts5: true,
+          pagerankScores,
+          activeFiles,
+          vectorStore: store,
+          embedder,
+        })
+      : await rankMemories(scope, query, {
+          limit: cfg.maxNotes,
+          useFts5: true,
+          pagerankScores,
+          activeFiles,
+        })
     // Preserve ordering relative to the ranked list but keep only notes
     // that were in the original `notes` array (shared docs are untouched).
     const notesByPath = new Map(docs.notes.map((n) => [n.path, n]))
@@ -197,6 +211,9 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   // Track files touched per session for file-aware retrieval boosting.
   const sessionFiles = new Map<string, Set<string>>()
   const sessionEvents = new Map<string, CaptureEventInput[]>()
+  let embedder: Embedder | null = null
+  let vectorStore: VectorStore | undefined
+  const embeddedPaths = new Set<string>()
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
@@ -238,12 +255,19 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         }
         log.info("registered /memory command")
       }
+      embedder = createEmbedder({
+        apiKey: cfgRef.embedApiKey,
+        model: cfgRef.embedModel,
+        dimensions: cfgRef.embedDimensions,
+      })
       if (cfgRef.autoCapture) {
         captureGate = new CaptureGate({
           enabled: true,
           model: cfgRef.captureModel,
           suggestThreshold: cfgRef.suggestThreshold,
           scopeResolver: async () => resolveScope(),
+          embedder,
+          getVectorStore: () => vectorStore,
         })
         log.info("auto-capture enabled", {
           model: cfgRef.captureModel,
@@ -366,7 +390,33 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         try {
           const docs = await loadAll(scope, cfgRef.maxNotes)
           const activeFiles = hookInput.sessionID ? sessionFiles.get(hookInput.sessionID) : undefined
-          const ranked = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles)
+          if (!vectorStore) {
+            try {
+              vectorStore = createVectorStore(path.join(scope.repoDir, "vectors.db"))
+            } catch (_err) {
+              void _err
+            }
+          }
+          if (embedder && vectorStore) {
+            const store = vectorStore
+            const emb = embedder
+            const toEmbed = docs.notes.filter((n) => !embeddedPaths.has(n.path))
+            if (toEmbed.length > 0) {
+              void Promise.allSettled(
+                toEmbed.map(async (note) => {
+                  const text = `${note.meta["title"] ?? ""} ${note.body}`.slice(0, 8000)
+                  if (!text.trim()) return
+                  const results = await emb.embed([text]).catch(() => null)
+                  const v = results?.[0]?.vector
+                  if (v) {
+                    store.upsert(note.path, v)
+                    embeddedPaths.add(note.path)
+                  }
+                }),
+              )
+            }
+          }
+          const ranked = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles, embedder, vectorStore)
           const injected = activeFiles?.size ? prependProactive(docs.notes, ranked, activeFiles) : ranked
           const refHealth = await buildRefHealthMap(input.worktree, injected)
           block = formatBlock(
