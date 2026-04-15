@@ -426,6 +426,9 @@ export class CaptureGate {
       "event-count": String(eventCount),
     }
     if (goSuggest) meta["suggested-at"] = new Date().toISOString()
+    const commitMeta = extractCommitMeta(batch)
+    if (commitMeta.commit) meta.commit = commitMeta.commit
+    if (commitMeta.task) meta.task = commitMeta.task
 
     const filepath = await writeNote(scope, {
       title: decision.title,
@@ -484,6 +487,34 @@ export class CaptureGate {
         })
       }
     }
+  }
+}
+
+function extractCommitMeta(batch: CaptureEventInput[]): Record<string, string> {
+  const ev = batch.find((e) => e.details?.subcommand === "commit" && e.details?.hash)
+  if (!ev) return {}
+  const meta: Record<string, string> = {}
+  meta.commit = ev.details!.hash as string
+  const refs = ev.details?.issueRefs as string[] | undefined
+  if (refs && refs.length > 0) meta.task = refs.join(",")
+  return meta
+}
+
+export function makeRevertGotcha(ev: CaptureEventInput): CaptureEventInput {
+  const hash = ev.details?.hash as string | undefined
+  const details: Record<string, unknown> = {
+    tool: "git",
+    subcommand: "revert",
+    kind: "gotcha",
+    importance: 0.9,
+  }
+  if (hash !== undefined) details.hash = hash
+  return {
+    kind: "tool.after",
+    sessionID: ev.sessionID,
+    summary: `git revert: This commit was reverted${hash ? ` (reverted: ${hash})` : ""}`,
+    details,
+    timestamp: ev.timestamp,
   }
 }
 
@@ -690,6 +721,7 @@ export const __internal = {
   isFilterable,
   normalizeHash,
   buildGateUserMessage,
+  extractCommitMeta,
   DEBOUNCE_MS,
   CIRCUIT_FAIL_THRESHOLD,
   CIRCUIT_PAUSE_MS,

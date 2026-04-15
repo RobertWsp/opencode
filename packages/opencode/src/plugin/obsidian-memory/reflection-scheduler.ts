@@ -42,6 +42,21 @@ interface ReflectionState {
 const stateByScope = new Map<string, ReflectionState>()
 let globalLock = false
 
+const CONDENSE_THRESHOLD = 5
+
+async function countSessionSummaries(notesDir: string): Promise<number> {
+  const entries = await fs.readdir(notesDir).catch(() => [] as string[])
+  const results = await Promise.all(
+    entries
+      .filter((e) => e.endsWith(".md"))
+      .map(async (name) => {
+        const text = await fs.readFile(path.join(notesDir, name), "utf8").catch(() => "")
+        return text.includes("memory-kind: session-summary") ? 1 : 0
+      }),
+  )
+  return results.reduce((a: number, b: number) => a + b, 0)
+}
+
 /**
  * Increment the session counter for a scope — called on session.idle.
  * Tracks "sessions since last reflection" for the temporal gate.
@@ -79,10 +94,12 @@ export async function runReflection(
     log.debug("reflection globally locked, skipping")
     return null
   }
-  if (!shouldReflectNow(scope, cfg)) {
+  const summaries = await countSessionSummaries(scope.notesDir)
+  if (!shouldReflectNow(scope, cfg) && summaries < CONDENSE_THRESHOLD) {
     log.debug("reflection gate not open", {
       scope: scopeKey(scope),
       state: stateByScope.get(scopeKey(scope)),
+      summaries,
     })
     return null
   }
@@ -261,6 +278,8 @@ export const __internal = {
   stateByScope,
   scopeKey,
   rewriteScopePaths,
+  countSessionSummaries,
+  CONDENSE_THRESHOLD,
   resetGlobalLock: () => {
     globalLock = false
   },

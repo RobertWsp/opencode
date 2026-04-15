@@ -23,7 +23,9 @@ export interface GitEventCandidate {
   /** Short human-readable summary for the capture event */
   summary: string
   /** Suggested memory-kind */
-  kind: "episode"
+  kind: "episode" | "merge" | "revert"
+  hash?: string
+  issueRefs?: string[]
 }
 
 /**
@@ -48,10 +50,17 @@ const INTERESTING_SUBCOMMANDS = new Set([
   "worktree",
 ])
 
-/**
- * Tokenize a bash command string. Very small shell splitter — enough for
- * `git ...` commands with quoted args. NOT a full POSIX parser.
- */
+export function extractIssueRefs(message: string): string[] {
+  if (!message) return []
+  const pattern = /(?:[A-Z]+-\d+|fixes?\s+(#\d+)|closes?\s+(#\d+)|#\d+)/gi
+  const refs = new Set<string>()
+  let m: RegExpExecArray | null
+  while ((m = pattern.exec(message)) !== null) {
+    refs.add(m[1] ?? m[2] ?? m[0])
+  }
+  return [...refs]
+}
+
 export function splitCommand(cmd: string): string[] {
   const out: string[] = []
   let current = ""
@@ -138,7 +147,30 @@ export function detectGitEvent(
   }
 
   const summary = formatSummary(subcommand, args, stdoutExcerpt)
-  return { subcommand, args, summary, kind: "episode" }
+  const kind: "episode" | "merge" | "revert" =
+    subcommand === "merge" ? "merge" : subcommand === "revert" ? "revert" : "episode"
+
+  let hash: string | undefined
+  if (subcommand === "revert" && args.length > 0) hash = args[0]
+  if (subcommand === "commit" && stdoutExcerpt) {
+    const brk = stdoutExcerpt.match(/\[([^\]]+)\]/)
+    if (brk) {
+      const last = brk[1].trim().split(/\s+/).at(-1) ?? ""
+      if (/^[a-f0-9]{7,40}$/.test(last)) hash = last
+    }
+  }
+
+  let issueRefs: string[] | undefined
+  if (subcommand === "commit") {
+    const msg = args.join(" ") + (stdoutExcerpt ? " " + stdoutExcerpt : "")
+    const r = extractIssueRefs(msg)
+    if (r.length > 0) issueRefs = r
+  }
+
+  const result: GitEventCandidate = { subcommand, args, summary, kind }
+  if (hash !== undefined) result.hash = hash
+  if (issueRefs !== undefined) result.issueRefs = issueRefs
+  return result
 }
 
 function formatSummary(
@@ -207,15 +239,19 @@ export function toCaptureEvent(
   candidate: GitEventCandidate,
   sessionID: string,
 ): CaptureEventInput {
+  const details: Record<string, unknown> = {
+    tool: "git",
+    subcommand: candidate.subcommand,
+    args: candidate.args.join(" "),
+  }
+  if (candidate.hash !== undefined) details.hash = candidate.hash
+  if (candidate.issueRefs !== undefined) details.issueRefs = candidate.issueRefs
+  if (candidate.kind !== "episode") details.kind = candidate.kind
   return {
     kind: "tool.after",
     sessionID,
     summary: `git:${candidate.subcommand} — ${candidate.summary}`,
-    details: {
-      tool: "git",
-      subcommand: candidate.subcommand,
-      args: candidate.args.join(" "),
-    },
+    details,
     timestamp: Date.now(),
   }
 }

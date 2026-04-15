@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   detectGitEvent,
+  extractIssueRefs,
   splitCommand,
   toCaptureEvent,
 } from "../../../src/plugin/obsidian-memory/git-event-detector"
@@ -123,6 +124,49 @@ describe("detectGitEvent", () => {
     )
     expect(ev!.summary).toContain("Switched to")
   })
+
+  test("detects merge command with kind merge", () => {
+    const ev = detectGitEvent("git merge feature/foo")
+    expect(ev!.subcommand).toBe("merge")
+    expect(ev!.kind).toBe("merge")
+  })
+
+  test("detects revert command with kind revert and extracts reverted hash", () => {
+    const ev = detectGitEvent("git revert abc1234")
+    expect(ev!.subcommand).toBe("revert")
+    expect(ev!.kind).toBe("revert")
+    expect(ev!.hash).toBe("abc1234")
+  })
+})
+
+describe("extractIssueRefs", () => {
+  test("extracts PROJ-123 style refs", () => {
+    const refs = extractIssueRefs("PROJ-123 fix auth bug")
+    expect(refs).toContain("PROJ-123")
+  })
+
+  test("extracts bare #N refs", () => {
+    const refs = extractIssueRefs("fix bug #456")
+    expect(refs).toContain("#456")
+  })
+
+  test("extracts ref from fixes #N pattern", () => {
+    const refs = extractIssueRefs("fixes #789 memory leak")
+    expect(refs).toContain("#789")
+  })
+
+  test("returns empty array for messages without refs", () => {
+    expect(extractIssueRefs("normal commit message")).toEqual([])
+    expect(extractIssueRefs("")).toEqual([])
+  })
+
+  test("handles multiple refs in one message", () => {
+    const refs = extractIssueRefs("PROJ-123 and fixes #456 also closes #789")
+    expect(refs).toContain("PROJ-123")
+    expect(refs).toContain("#456")
+    expect(refs).toContain("#789")
+    expect(refs).toHaveLength(3)
+  })
 })
 
 describe("toCaptureEvent", () => {
@@ -134,5 +178,17 @@ describe("toCaptureEvent", () => {
     expect(ev.summary).toContain("git:checkout")
     expect(ev.details?.tool).toBe("git")
     expect(ev.details?.subcommand).toBe("checkout")
+  })
+
+  test("includes commit hash in details when stdout has hash", () => {
+    const candidate = detectGitEvent("git commit -m fix", "[main abc1234] fix\n 1 file changed")!
+    const ev = toCaptureEvent(candidate, "ses_1")
+    expect(ev.details?.hash).toBe("abc1234")
+  })
+
+  test("marks revert events with kind revert in details", () => {
+    const candidate = detectGitEvent("git revert abc1234")!
+    const ev = toCaptureEvent(candidate, "ses_1")
+    expect(ev.details?.kind).toBe("revert")
   })
 })

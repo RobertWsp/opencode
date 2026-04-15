@@ -52,6 +52,8 @@ export type ConsolidateOp =
   | { type: "rewrite"; path: string; summary: string }
   | { type: "promote"; source: string; target: string; summary: string }
   | { type: "delete"; path: string; reason: string }
+  | { type: "evolve"; path: string; summary: string; reason: string }
+  | { type: "condense"; sources: string[]; target: string; summary: string }
 
 interface ConsolidatorState {
   inflight: Set<string>
@@ -204,9 +206,10 @@ const CONSOLIDATOR_SYSTEM_PROMPT = `You are a memory consolidator for a coding a
 
 You receive a list of recently-captured memory notes. Your job is to keep
 the vault tight: merge duplicates, drop low-signal entries, promote facts
-that apply to the whole repo (not just the current branch), and tighten
-prose. Be AGGRESSIVE — the cost of a bloated vault is worse than losing
-a noisy note.
+that apply to the whole repo (not just the current branch), tighten prose,
+enrich existing notes with new findings, and condense session summaries into
+learned patterns. Be AGGRESSIVE — the cost of a bloated vault is worse than
+losing a noisy note.
 
 Output STRICTLY valid JSON, an array of operations. No prose, no markdown:
 
@@ -214,7 +217,9 @@ Output STRICTLY valid JSON, an array of operations. No prose, no markdown:
   {"type": "merge", "sources": ["relpath1", "relpath2"], "target_title": "short-kebab", "body": "merged markdown"},
   {"type": "rewrite", "path": "relpath", "body": "tightened markdown"},
   {"type": "promote", "source": "relpath", "reason": "applies to whole repo"},
-  {"type": "delete", "path": "relpath", "reason": "routine, no future value"}
+  {"type": "delete", "path": "relpath", "reason": "routine, no future value"},
+  {"type": "evolve", "path": "relpath", "addendum": "new info to append", "reason": "why this enriches the note"},
+  {"type": "condense", "sources": ["sess1.md", "sess2.md", "sess3.md", "sess4.md", "sess5.md"], "target": "learned-topic-slug", "summary": "extracted pattern in markdown"}
 ]
 
 Rules:
@@ -222,9 +227,16 @@ Rules:
 - "promote" moves a note from branches/<branch>/notes/ to repos/<slug>/MEMORY.md
   (appended as a new section). The original source is deleted after merge into MEMORY.md.
 - "delete" is permanent (audit is via git)
+- "evolve" ENRICHES an existing note — appends the addendum below a dated separator,
+  preserving all original content. Use instead of rewrite when the note is still valid
+  but new information extends it (A-MEM style evolution).
+- "condense" is for session-summary notes: when 5 or more notes with memory-kind=session-summary
+  exist, combine them into a single learned-pattern note (memory-kind=learned-pattern,
+  importance=0.8). The sources (session-summary notes) will be deleted after condensation.
+  Extract recurring patterns, decisions, and gotchas from the summaries.
 - Empty array is valid — return [] if no consolidation needed
-- Never output notes paths that were not in the input
-- Conserve information: if you merge, the target body must capture everything useful from sources
+- Never output note paths that were not in the input
+- Conserve information: if you merge or condense, the target body must capture everything useful
 - "rewrite" keeps the same path but replaces body (title/meta unchanged)`
 
 function buildConsolidatorPayload(scope: Scope, notes: LoadedNote[]): string {
@@ -301,6 +313,25 @@ export function parseConsolidatorResponse(raw: string): ConsolidateOp[] | null {
       if (typeof p === "string" && !path.isAbsolute(p) && !p.includes("..")) {
         out.push({ type: "delete", path: p, reason: typeof reason === "string" ? reason : "" })
       }
+    } else if (type === "evolve") {
+      const p = op["path"]
+      const addendum = op["addendum"] ?? op["body"]
+      const reason = op["reason"]
+      if (typeof p === "string" && typeof addendum === "string" && !path.isAbsolute(p) && !p.includes("..")) {
+        out.push({ type: "evolve", path: p, summary: addendum, reason: typeof reason === "string" ? reason : "" })
+      }
+    } else if (type === "condense") {
+      const sources = op["sources"]
+      const target = op["target"]
+      const summary = op["summary"]
+      if (Array.isArray(sources) && typeof target === "string" && typeof summary === "string") {
+        const valid = sources
+          .filter((s): s is string => typeof s === "string")
+          .filter((s) => !path.isAbsolute(s) && !s.includes(".."))
+        if (valid.length > 0) {
+          out.push({ type: "condense", sources: valid, target, summary })
+        }
+      }
     }
   }
   return out
@@ -363,6 +394,43 @@ async function applyOperation(scope: Scope, op: ConsolidateOp): Promise<boolean>
       await fs.unlink(srcAbs).catch(() => undefined)
       return true
     }
+    if (op.type === "evolve") {
+      const abs = resolveWithinVault(scope, op.path)
+      if (!abs) return false
+      const source = await fs.readFile(abs, "utf8").catch(() => null)
+      if (!source) return false
+      const { meta, body } = parseFrontmatter(source)
+      const now = new Date().toISOString()
+      const count = parseInt(meta["evolution-count"] ?? "0", 10) + 1
+      const newMeta = { ...meta, "evolved-at": now, "evolution-count": String(count) }
+      const separator = `\n\n---\n## Evolution (${now.slice(0, 10)})\n\n`
+      await fs.writeFile(abs, serializeFrontmatter(newMeta, body.trimEnd() + separator + op.summary), "utf8")
+      return true
+    }
+    if (op.type === "condense") {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-")
+      const slug =
+        op.target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "learned"
+      const targetAbs = path.join(scope.notesDir, `${ts}-learned-${slug}.md`)
+      const meta = {
+        type: "memory-note",
+        title: op.target,
+        repo: scope.shortHash,
+        branch: scope.branchSlug,
+        created: new Date().toISOString(),
+        "memory-kind": "learned-pattern",
+        importance: "0.8",
+        source: "sonnet-consolidator",
+        "condensed-from": op.sources.map((s) => path.basename(s)).join(","),
+      }
+      await fs.mkdir(path.dirname(targetAbs), { recursive: true })
+      await fs.writeFile(targetAbs, serializeFrontmatter(meta, op.summary), "utf8")
+      for (const src of op.sources) {
+        const abs = resolveWithinVault(scope, src)
+        if (abs) await fs.unlink(abs).catch(() => undefined)
+      }
+      return true
+    }
     return false
   } catch (err) {
     log.error("applyOperation failed", { op, error: String(err) })
@@ -391,12 +459,14 @@ function resolveWithinVault(scope: Scope, relOrAbs: string): string | null {
 }
 
 function buildCommitMessage(scope: Scope, ops: ConsolidateOp[]): string {
-  const counts = { merge: 0, rewrite: 0, promote: 0, delete: 0 }
+  const counts = { merge: 0, rewrite: 0, promote: 0, delete: 0, evolve: 0, condense: 0 }
   for (const op of ops) counts[op.type]++
   const parts: string[] = []
   if (counts.merge) parts.push(`${counts.merge} merged`)
   if (counts.rewrite) parts.push(`${counts.rewrite} rewritten`)
   if (counts.promote) parts.push(`${counts.promote} promoted`)
   if (counts.delete) parts.push(`${counts.delete} deleted`)
+  if (counts.evolve) parts.push(`${counts.evolve} evolved`)
+  if (counts.condense) parts.push(`${counts.condense} condensed`)
   return `memory(consolidate): ${parts.join(", ")} [${scope.branchSlug}]`
 }
