@@ -99,6 +99,9 @@ export interface MemoryConfig {
   suggestThreshold: number
   sessionSummary?: boolean
   autoInit?: boolean
+  embedApiKey?: string
+  embedModel?: string
+  embedDimensions?: number
 }
 
 export interface Scope {
