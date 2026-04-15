@@ -82,7 +82,8 @@ describe("computePageRank", () => {
       skipCommit: true,
     })
     const result = await computePageRank(scope)
-    expect(result.edgeCount).toBe(3)
+    // 3 forward edges (sat→hub) + 3 backlinks (hub→sat) = 6 bidirectional edges
+    expect(result.edgeCount).toBe(6)
     expect(result.scores.get(pathHub)).toBe(1)
     // All satellites should score LESS than the hub
     for (const [path, score] of result.scores) {

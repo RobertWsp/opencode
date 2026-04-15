@@ -70,9 +70,20 @@ export async function computePageRank(
     indexByTitle.set(entry.title.toLowerCase(), i)
   })
 
-  // Build adjacency via wikilinks: for each entry, resolve [[target]] to index
+  // Build adjacency via wikilinks. Edges are BIDIRECTIONAL: if A links B,
+  // both A→B and B→A are created. This mirrors Obsidian's backlink behavior
+  // and ensures PageRank flows in both directions — a note that is heavily
+  // referenced (like a "hub" concept) boosts the notes that reference it AND
+  // the notes it points to. Inspired by A-MEM (NeurIPS 2025) which establishes
+  // bidirectional links for connected knowledge graphs.
   const outEdges: number[][] = entries.map(() => [])
   let edgeCount = 0
+  const addEdge = (from: number, to: number) => {
+    if (!outEdges[from].includes(to)) {
+      outEdges[from].push(to)
+      edgeCount++
+    }
+  }
   entries.forEach((entry, i) => {
     for (const link of entry.links) {
       const key = link.toLowerCase()
@@ -80,8 +91,8 @@ export async function computePageRank(
         indexByTitle.get(key) ??
         indexByTitle.get(titleToSlug(link).toLowerCase())
       if (target !== undefined && target !== i) {
-        outEdges[i].push(target)
-        edgeCount++
+        addEdge(i, target)  // forward: A → B
+        addEdge(target, i)  // backlink: B → A
       }
     }
   })

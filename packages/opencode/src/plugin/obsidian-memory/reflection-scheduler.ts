@@ -119,7 +119,7 @@ export async function runReflection(
         }
       }
 
-      markReflected(scope)
+      if (result.ok) markReflected(scope)
       return result
     } finally {
       await cleanupWorktree(scope.vaultRoot, worktreePath).catch((err) => {
@@ -250,6 +250,7 @@ function rewriteScopePaths(scope: Scope, newVaultRoot: string): Scope {
     branchDir: path.join(newVaultRoot, rel(scope.branchDir)),
     branchSharedPath: path.join(newVaultRoot, rel(scope.branchSharedPath)),
     notesDir: path.join(newVaultRoot, rel(scope.notesDir)),
+    suggestedDir: path.join(newVaultRoot, rel(scope.suggestedDir)),
     systemDir: path.join(newVaultRoot, rel(scope.systemDir)),
     systemSharedPath: path.join(newVaultRoot, rel(scope.systemSharedPath)),
   }

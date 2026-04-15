@@ -174,6 +174,10 @@ export async function approve(scope: Scope, filename: string): Promise<CommandRe
   if (!exists) {
     return { ok: false, text: `[memory] not found: ${cleanName}` }
   }
+  const destExists = await fs.stat(dest).then(() => true).catch(() => false)
+  if (destExists) {
+    return { ok: false, text: `[memory] file already exists in notes: ${cleanName}` }
+  }
   await fs.mkdir(scope.notesDir, { recursive: true })
   await fs.rename(src, dest)
   const relpath = path.relative(scope.vaultRoot, dest)

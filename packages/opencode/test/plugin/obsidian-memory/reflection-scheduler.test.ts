@@ -25,6 +25,7 @@ function makeScope(id = "abc"): Scope {
     branchDir,
     branchSharedPath: `${branchDir}/MEMORY.md`,
     notesDir: `${branchDir}/notes`,
+    suggestedDir: `${branchDir}/suggested`,
     systemDir: "/vault/_system",
     systemSharedPath: "/vault/_system/MEMORY.md",
   }

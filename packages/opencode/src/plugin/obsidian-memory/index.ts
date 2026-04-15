@@ -36,6 +36,40 @@ function replaceParts(output: { parts: Array<{ type: string; text?: string }> },
   output.parts.push({ type: "text", text })
 }
 
+/**
+ * Extract file paths from tool call arguments. Different tools store their
+ * path argument under different keys. Returns workspace-relative paths when
+ * possible, deduped and capped to avoid bloating capture events.
+ */
+function extractFilePaths(tool: string, args: Record<string, unknown> | undefined): string[] {
+  if (!args) return []
+  const paths: string[] = []
+  // Common tool argument keys that contain file paths
+  const pathKeys = ["file_path", "path", "filePath", "file", "command"]
+  for (const key of pathKeys) {
+    const val = args[key]
+    if (typeof val === "string" && val.length > 0 && val.length < 500) {
+      if (key === "command") {
+        // For bash commands, extract paths from common patterns
+        // e.g. "cat src/foo.ts", "vim /abs/path.ts"
+        // (?!\w) ensures full extension match (e.g. .json not .js from "json")
+        const fileHits = val.match(/(?:^|\s)((?:\/|\.\/|\.\.\/)?(?:[\w./-]+\.(?:tsx|jsx|jsonc|json|ts|js|yaml|yml|toml|py|rs|go|rb|java|cpp|css|html|vue|svelte|md|c|h)(?!\w)))/g)
+        if (fileHits) {
+          for (const hit of fileHits.slice(0, 5)) paths.push(hit.trim())
+        }
+      } else {
+        paths.push(val)
+      }
+    }
+  }
+  // old_string/new_string for edit tool — extract the file_path
+  if (args["old_string"] && typeof args["file_path"] === "string") {
+    // Already captured above via pathKeys
+  }
+  // Dedupe and limit
+  return [...new Set(paths)].slice(0, 10)
+}
+
 /** Deterministic short hash used only as a cache key segment. */
 function shortHash(s: string): string {
   let h = 5381
@@ -56,6 +90,7 @@ async function maybeRank(
   userPrompt: string,
   docs: VaultDocs,
   cfg: MemoryConfig,
+  activeFiles?: Set<string>,
 ): Promise<VaultDocs> {
   if (!cfg.smartRetrieval || docs.notes.length === 0) return docs
   const query = cfg.hydeExpansion
@@ -73,6 +108,7 @@ async function maybeRank(
       limit: cfg.maxNotes,
       useFts5: true,
       pagerankScores,
+      activeFiles,
     })
     // Preserve ordering relative to the ranked list but keep only notes
     // that were in the original `notes` array (shared docs are untouched).
@@ -135,6 +171,8 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   let captureGate: CaptureGate | undefined
   // Remember last user prompt per session so injection can use it for ranking.
   const lastPrompt = new Map<string, string>()
+  // Track files touched per session for file-aware retrieval boosting.
+  const sessionFiles = new Map<string, Set<string>>()
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
@@ -152,6 +190,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         cfgRef = undefined
         return
       }
+      cache.clear()
       cfgRef = {
         enabled: true,
         vaultPath: anyCfg.memory.vaultPath,
@@ -245,16 +284,42 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       if (!cfgRef?.enabled) return
       if (hookInput.model?.providerID !== "anthropic") return
 
-      const scope = await resolveScope()
+      let scope: Scope | null = null
+      try {
+        scope = await resolveScope()
+      } catch (err) {
+        log.error("resolveScope threw", { error: String(err) })
+        return
+      }
       if (!scope) {
         log.debug("scope detection failed — skipping injection")
         return
       }
 
-      const userPrompt = hookInput.sessionID ? lastPrompt.get(hookInput.sessionID) ?? "" : ""
+      // Get the user prompt for ranking. On the first turn, chat.message may
+      // not have fired yet, so also check hookInput for any prompt content.
+      let userPrompt = hookInput.sessionID ? lastPrompt.get(hookInput.sessionID) ?? "" : ""
+      if (!userPrompt && hookInput.sessionID) {
+        // Fallback: try to extract from hookInput if available (first turn scenario)
+        const messages = (hookInput as unknown as { messages?: Array<{ role?: string; content?: string }> }).messages
+        if (Array.isArray(messages)) {
+          const last = messages.filter((m) => m.role === "user").pop()
+          if (last?.content) {
+            userPrompt = typeof last.content === "string" ? last.content.slice(0, 500) : ""
+            if (userPrompt) lastPrompt.set(hookInput.sessionID, userPrompt)
+          }
+        }
+      }
       const queryHash = userPrompt ? shortHash(userPrompt) : "none"
       const cacheKey = `${scope.repoSlug}::${scope.branchSlug}::${queryHash}`
-      const fp = await fingerprint(scope)
+
+      let fp: string
+      try {
+        fp = await fingerprint(scope)
+      } catch (err) {
+        log.error("fingerprint threw", { error: String(err) })
+        return
+      }
       const cached = cache.get(cacheKey)
       const now = Date.now()
 
@@ -264,17 +329,26 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         block = cached.block
         wasCached = true
       } else {
-        const docs = await loadAll(scope, cfgRef.maxNotes)
-        const rankedDocs = await maybeRank(scope, userPrompt, docs, cfgRef)
-        const refHealth = await buildRefHealthMap(input.worktree, rankedDocs)
-        block = formatBlock(
-          scope,
-          rankedDocs,
-          { maxBytes: cfgRef.maxBytes },
-          refHealth,
-          cfgRef.injectionStyle,
-        )
-        cache.set(cacheKey, { fingerprint: fp, block, ts: now })
+        try {
+          const docs = await loadAll(scope, cfgRef.maxNotes)
+          const activeFiles = hookInput.sessionID ? sessionFiles.get(hookInput.sessionID) : undefined
+          const rankedDocs = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles)
+          const refHealth = await buildRefHealthMap(input.worktree, rankedDocs)
+          block = formatBlock(
+            scope,
+            rankedDocs,
+            { maxBytes: cfgRef.maxBytes },
+            refHealth,
+            cfgRef.injectionStyle,
+          )
+          cache.set(cacheKey, { fingerprint: fp, block, ts: now })
+        } catch (err) {
+          log.error("retrieval pipeline threw", {
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack?.slice(0, 500) : undefined,
+          })
+          return
+        }
       }
 
       if (!block) return
@@ -316,6 +390,22 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       if (!captureGate) return
       if (!hookOutput) return
       const summary = typeof hookOutput.title === "string" ? hookOutput.title : hookInput.tool
+
+      // Extract file paths from tool arguments so memories record which files
+      // the agent was working on — critical for file-aware retrieval later.
+      const toolArgs = (hookInput as unknown as { args?: Record<string, unknown> }).args
+      const filePaths = extractFilePaths(hookInput.tool, toolArgs)
+
+      // Track files touched in this session for retrieval boosting
+      if (filePaths.length > 0) {
+        let files = sessionFiles.get(hookInput.sessionID)
+        if (!files) {
+          files = new Set()
+          sessionFiles.set(hookInput.sessionID, files)
+        }
+        for (const fp of filePaths) files.add(fp)
+      }
+
       const ev: CaptureEventInput = {
         kind: "tool.after",
         sessionID: hookInput.sessionID,
@@ -323,10 +413,15 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         details: {
           tool: hookInput.tool,
           callID: hookInput.callID,
+          ...(filePaths.length > 0 ? { files: filePaths } : {}),
         },
         timestamp: Date.now(),
       }
-      captureGate.enqueue(ev)
+      // AWAIT the enqueue — this is critical for `opencode run` single-shot
+      // mode where the process exits immediately after session.idle and
+      // fire-and-forget timers never run. The gate's internal debounce
+      // still batches rapid events within a turn.
+      await captureGate.enqueue(ev)
 
       // Git event enrichment: when the agent runs `git <subcommand>` via
       // bash, surface it as an additional high-signal capture event so
@@ -340,7 +435,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
             typeof hookOutput.output === "string" ? hookOutput.output : undefined,
           )
           if (candidate) {
-            captureGate.enqueue(toCaptureEvent(candidate, hookInput.sessionID))
+            await captureGate.enqueue(toCaptureEvent(candidate, hookInput.sessionID))
           }
         }
       }
@@ -375,7 +470,11 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           | { sessionID?: string; info?: { id?: string } }
           | undefined
         const sessionID = props?.sessionID ?? props?.info?.id
-        if (sessionID) captureGate.forget(sessionID)
+        if (sessionID) {
+          captureGate.forget(sessionID)
+          lastPrompt.delete(sessionID)
+          sessionFiles.delete(sessionID)
+        }
       } else if (event.type === "session.error") {
         const props = event.properties as
           | { sessionID?: string; error?: { message?: string } }
@@ -393,3 +492,6 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
     },
   }
 }
+
+/** Exposed for tests */
+export const __internal = { extractFilePaths }

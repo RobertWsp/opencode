@@ -107,3 +107,158 @@ describe("serializeFrontmatter", () => {
     expect(serialized).toContain("\n---\n")
   })
 })
+
+describe("YAML arrays (Obsidian compatibility)", () => {
+  test("tags serialized as inline YAML array, not comma string", () => {
+    const serialized = serializeFrontmatter(
+      { tags: "jwt,middleware,debugging", title: "t" },
+      "body",
+    )
+    expect(serialized).toContain("tags: [jwt, middleware, debugging]")
+    expect(serialized).not.toContain("tags: jwt,middleware,debugging")
+  })
+
+  test("links serialized as inline YAML array", () => {
+    const serialized = serializeFrontmatter(
+      { links: "note-a,note-b,note-c" },
+      "body",
+    )
+    expect(serialized).toContain("links: [note-a, note-b, note-c]")
+  })
+
+  test("aliases serialized as inline YAML array", () => {
+    const serialized = serializeFrontmatter({ aliases: "auth,jwt-auth" }, "body")
+    expect(serialized).toContain("aliases: [auth, jwt-auth]")
+  })
+
+  test("empty list becomes []", () => {
+    const serialized = serializeFrontmatter({ tags: "" }, "body")
+    expect(serialized).toContain("tags: []")
+  })
+
+  test("single item still as array for consistency", () => {
+    const serialized = serializeFrontmatter({ tags: "just-one" }, "body")
+    expect(serialized).toContain("tags: [just-one]")
+  })
+
+  test("list items with problematic chars get quoted inside array", () => {
+    const serialized = serializeFrontmatter({ tags: "plain,with space,has:colon" }, "body")
+    expect(serialized).toContain("[plain, ")
+    expect(serialized).toContain('"with space"')
+    expect(serialized).toContain('"has:colon"')
+  })
+
+  test("parse inline YAML array back to canonical comma form", () => {
+    const source = `---
+tags: [jwt, middleware, debugging]
+title: Test
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.tags).toBe("jwt,middleware,debugging")
+    expect(parsed.meta.title).toBe("Test")
+  })
+
+  test("parse multiline YAML array", () => {
+    const source = `---
+tags:
+  - jwt
+  - middleware
+  - debugging
+title: Test
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.tags).toBe("jwt,middleware,debugging")
+    expect(parsed.meta.title).toBe("Test")
+  })
+
+  test("parse multiline list with quoted items", () => {
+    const source = `---
+aliases:
+  - plain
+  - "with space"
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.aliases).toBe("plain,with space")
+  })
+
+  test("round-trip tags through YAML array", () => {
+    const input = { tags: "a,b,c" }
+    const serialized = serializeFrontmatter(input, "body")
+    const parsed = parseFrontmatter(serialized)
+    expect(parsed.meta.tags).toBe("a,b,c")
+  })
+
+  test("parse legacy JSON-array value (backward compat)", () => {
+    const source = `---
+links: "[\\"note-a\\",\\"note-b\\"]"
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.links).toBe("note-a,note-b")
+  })
+
+  test("parse legacy comma-string value (backward compat)", () => {
+    const source = `---
+tags: jwt,middleware
+---
+body`
+    const parsed = parseFrontmatter(source)
+    // Legacy form is still accepted — stored as-is (no commas semantic)
+    expect(parsed.meta.tags).toContain("jwt")
+  })
+
+  test("refs treated as list-key", () => {
+    const serialized = serializeFrontmatter(
+      { refs: "src/foo.ts:42-58,src/bar.ts" },
+      "body",
+    )
+    expect(serialized).toContain("refs: [")
+    // refs values contain `:` so must be quoted inside the array
+    expect(serialized).toContain('"src/foo.ts:42-58"')
+  })
+
+  test("Obsidian wikilink [[target]] is NOT confused with YAML array", () => {
+    const source = `---
+superseded_by: [[new-note]]
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.superseded_by).toBe("[[new-note]]")
+  })
+
+  test("Obsidian wikilink preserved through round-trip", () => {
+    const input = { superseded_by: "[[new-note]]" }
+    const serialized = serializeFrontmatter(input, "body")
+    const parsed = parseFrontmatter(serialized)
+    expect(parsed.meta.superseded_by).toBe("[[new-note]]")
+  })
+
+  test("round-trip a full memory-note frontmatter", () => {
+    const input = {
+      type: "memory-note",
+      "memory-kind": "gotcha",
+      title: "JWT middleware bug",
+      repo: "abc123",
+      branch: "main",
+      created: "2026-04-15T12:30:05Z",
+      valid_from: "2026-04-15T12:30:05Z",
+      valid_until: "null",
+      tags: "jwt,auth,middleware",
+      links: "auth-overview,middleware-guide",
+      importance: "0.8",
+    }
+    const serialized = serializeFrontmatter(input, "Body content")
+    const parsed = parseFrontmatter(serialized)
+    expect(parsed.meta["memory-kind"]).toBe("gotcha")
+    expect(parsed.meta.title).toBe("JWT middleware bug")
+    expect(parsed.meta.tags).toBe("jwt,auth,middleware")
+    expect(parsed.meta.links).toBe("auth-overview,middleware-guide")
+    expect(parsed.meta.importance).toBe("0.8")
+    // Obsidian-compatibility: tags rendered as array
+    expect(serialized).toContain("tags: [jwt, auth, middleware]")
+    expect(serialized).toContain("links: [auth-overview, middleware-guide]")
+  })
+})

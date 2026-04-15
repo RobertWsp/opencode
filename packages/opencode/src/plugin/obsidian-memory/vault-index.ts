@@ -159,7 +159,7 @@ export class VaultIndex {
            FROM memories_fts
            JOIN memories m ON memories_fts.path = m.path
            WHERE memories_fts MATCH ?
-             AND (m.valid_until IS NULL OR m.valid_until = '')
+             AND (m.valid_until IS NULL OR m.valid_until = '' OR m.valid_until > datetime('now'))
            ORDER BY rank ASC
            LIMIT ?`,
         )
@@ -183,7 +183,7 @@ export class VaultIndex {
     const rows = db
       .query(
         `SELECT * FROM memories
-         WHERE valid_until IS NULL OR valid_until = ''
+         WHERE valid_until IS NULL OR valid_until = '' OR valid_until > datetime('now')
          ORDER BY mtime_ms DESC
          LIMIT ?`,
       )
@@ -335,7 +335,7 @@ function bodyHash(body: string): string {
  * the "syntax error" that FTS5 throws on punctuation, parentheses, etc.
  */
 export function sanitizeFtsQuery(query: string): string {
-  const tokens = query.match(/[a-zA-Z0-9][a-zA-Z0-9_-]{1,}/g)
+  const tokens = query.match(/[a-zA-Z0-9][a-zA-Z0-9_-]*/g)
   if (!tokens || tokens.length === 0) return ""
   return tokens.map((t) => `"${t}"`).join(" OR ")
 }

@@ -127,10 +127,16 @@ function firstMeaningfulLine(body: string): string {
 }
 
 /**
- * True when the memory is still valid at the given instant (default: now).
- * A memory with `valid_until == null` is always valid.
+ * True when the memory is valid at the given instant (default: now).
+ * Checks both `validFrom` (must be in the past) and `validUntil` (must be
+ * in the future or absent). A memory with `valid_until == null` and
+ * `validFrom <= now` is always valid.
  */
 export function isValidAt(entry: MemoryEntry, atMs: number = Date.now()): boolean {
+  // Check validFrom — memory is not yet active if we're before its start
+  const from = Date.parse(entry.validFrom)
+  if (Number.isFinite(from) && atMs < from) return false
+  // Check validUntil — memory expired if we're past its end
   if (!entry.validUntil) return true
   const until = Date.parse(entry.validUntil)
   if (!Number.isFinite(until)) return true

@@ -1,8 +1,52 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, afterAll } from "bun:test"
+import { promises as fs } from "fs"
+import os from "os"
+import path from "path"
 import {
   __internal,
   parseGateResponse,
+  CaptureGate,
 } from "../../../src/plugin/obsidian-memory/capture-gate"
+import { parseFrontmatter } from "../../../src/plugin/obsidian-memory/frontmatter"
+import type { Scope } from "../../../src/plugin/obsidian-memory/types"
+
+const tempDirs: string[] = []
+
+async function makeTempScope(): Promise<Scope> {
+  const vaultRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omem-cg-"))
+  tempDirs.push(vaultRoot)
+  const repoSlug = "test-abc"
+  const branchSlug = "main"
+  const repoDir = path.join(vaultRoot, "opencode", "repos", repoSlug)
+  const branchDir = path.join(repoDir, "branches", branchSlug)
+  const notesDir = path.join(branchDir, "notes")
+  const suggestedDir = path.join(branchDir, "suggested")
+  const systemDir = path.join(vaultRoot, "_system")
+  await fs.mkdir(notesDir, { recursive: true })
+  await fs.mkdir(suggestedDir, { recursive: true })
+  return {
+    vaultRoot,
+    basename: "test",
+    shortHash: "abc",
+    repoSlug,
+    branchRaw: "main",
+    branchSlug,
+    repoDir,
+    repoSharedPath: path.join(repoDir, "MEMORY.md"),
+    branchDir,
+    branchSharedPath: path.join(branchDir, "MEMORY.md"),
+    notesDir,
+    suggestedDir,
+    systemDir,
+    systemSharedPath: path.join(systemDir, "MEMORY.md"),
+  }
+}
+
+afterAll(async () => {
+  for (const dir of tempDirs) {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined)
+  }
+})
 
 describe("isTrivial pre-filter", () => {
   test("drops trivial read tools", () => {
@@ -227,5 +271,138 @@ describe("parseGateResponse — new 4-op schema", () => {
       parseGateResponse(JSON.stringify({ op: "ADD", kind: "nonsense", title: "t", body: "b" }))!
         .kind,
     ).toBe("fact")
+  })
+})
+
+describe("wikilink validation — links must reference existing vault notes only", () => {
+  test("empty vault → message says vault is empty, set links to []", () => {
+    const prompt = __internal.buildGateUserMessage(
+      [{ kind: "tool.after", sessionID: "s", summary: "edit file", timestamp: 0 }],
+      "fix auth",
+      [],
+      [],  // empty vault
+    )
+    expect(prompt).not.toContain("Existing candidates")
+    expect(prompt).toContain("vault is empty")
+    expect(prompt).toContain("links to []")
+  })
+
+  test("vault with notes → message includes ALL titles for linking", () => {
+    const prompt = __internal.buildGateUserMessage(
+      [{ kind: "tool.after", sessionID: "s", summary: "edit file", timestamp: 0 }],
+      "fix auth",
+      [
+        { id: "cand_0", title: "jwt-expiry-gotcha", description: "JWT tokens expire", tags: ["auth"] },
+      ],
+      ["jwt-expiry-gotcha", "redis-caching-pattern", "zustand-store-patterns"],
+    )
+    // Candidates section (for UPDATE/DELETE)
+    expect(prompt).toContain("Existing candidates (1)")
+    expect(prompt).toContain("cand_0")
+    // Full vault titles (for linking)
+    expect(prompt).toContain("All vault titles (3)")
+    expect(prompt).toContain('"jwt-expiry-gotcha"')
+    expect(prompt).toContain('"redis-caching-pattern"')
+    expect(prompt).toContain('"zustand-store-patterns"')
+  })
+
+  test("parseGateResponse keeps links from Haiku output as-is (filtering happens in runGate)", () => {
+    const raw = JSON.stringify({
+      op: "ADD",
+      kind: "gotcha",
+      title: "new-note",
+      body: "content",
+      tags: ["auth"],
+      links: ["jwt-expiry-gotcha", "hallucinated-note", "redis-caching-pattern"],
+      importance: 0.7,
+    })
+    const decision = parseGateResponse(raw)
+    // Parser preserves all links — filtering is done at the gate level
+    expect(decision!.links).toEqual(["jwt-expiry-gotcha", "hallucinated-note", "redis-caching-pattern"])
+  })
+
+  test("body from gate response should NOT contain ## Related section", () => {
+    const raw = JSON.stringify({
+      op: "ADD",
+      kind: "fact",
+      title: "test-note",
+      body: "Just the content without related section",
+      tags: [],
+      links: ["some-link"],
+      importance: 0.5,
+    })
+    const decision = parseGateResponse(raw)
+    expect(decision!.body).not.toContain("## Related")
+    expect(decision!.body).not.toContain("[[")
+  })
+
+  test("CaptureGate writes note WITHOUT ## Related body section", async () => {
+    // This tests the full write path (sans LLM) by simulating what
+    // applyOp does: it writes decision.body directly, not fullBody with renderLinksBlock
+    const scope = await makeTempScope()
+    const { writeNote } = await import("../../../src/plugin/obsidian-memory/vault")
+
+    // Simulate what the gate does after filtering links
+    const body = "## Problem\nSome technical gotcha\n\n## Solution\nThe fix"
+    const meta = {
+      "memory-kind": "gotcha",
+      source: "haiku-gate",
+      importance: "0.8",
+      tags: "auth,jwt",
+      links: "jwt-expiry-gotcha",  // only validated links
+    }
+
+    const filepath = await writeNote(scope, {
+      title: "auth-token-bug",
+      body,
+      meta,
+      skipCommit: true,
+    })
+
+    const content = await fs.readFile(filepath, "utf8")
+    const parsed = parseFrontmatter(content)
+
+    // Body should NOT contain ## Related or [[wikilinks]]
+    expect(parsed.body).not.toContain("## Related")
+    expect(parsed.body).not.toContain("[[")
+
+    // Links should be in frontmatter ONLY
+    expect(parsed.meta.links).toBeDefined()
+    expect(content).toContain("links:")
+  })
+
+  test("frontmatter links field stores validated links as YAML array", async () => {
+    const scope = await makeTempScope()
+    const { writeNote } = await import("../../../src/plugin/obsidian-memory/vault")
+
+    const filepath = await writeNote(scope, {
+      title: "test-links-format",
+      body: "content",
+      meta: { links: "note-a,note-b,note-c" },
+      skipCommit: true,
+    })
+
+    const content = await fs.readFile(filepath, "utf8")
+    // Should be YAML inline array (Obsidian-compatible)
+    expect(content).toContain("links: [note-a, note-b, note-c]")
+    // Should NOT be comma-separated string
+    expect(content).not.toContain("links: note-a,note-b,note-c")
+  })
+
+  test("empty links produces empty YAML array, not dangling section", async () => {
+    const scope = await makeTempScope()
+    const { writeNote } = await import("../../../src/plugin/obsidian-memory/vault")
+
+    const filepath = await writeNote(scope, {
+      title: "no-links-note",
+      body: "standalone content",
+      meta: { links: "" },
+      skipCommit: true,
+    })
+
+    const content = await fs.readFile(filepath, "utf8")
+    expect(content).toContain("links: []")
+    expect(content).not.toContain("## Related")
+    expect(content).not.toContain("[[")
   })
 })

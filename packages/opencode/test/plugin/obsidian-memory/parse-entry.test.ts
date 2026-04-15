@@ -171,6 +171,21 @@ describe("isValidAt", () => {
     const entry = toEntry(
       makeDoc({ meta: { valid_until: "2026-04-20T00:00:00Z" } }),
     )
+    // Check at a time AFTER validFrom (derived from mtimeMs = 2026-04-15T10:00:00Z)
+    expect(isValidAt(entry, Date.parse("2026-04-16T00:00:00Z"))).toBe(true)
+  })
+
+  test("not yet valid before validFrom", () => {
+    const entry = toEntry(
+      makeDoc({ meta: { valid_from: "2026-05-01T00:00:00Z" } }),
+    )
+    expect(isValidAt(entry, Date.parse("2026-04-15T00:00:00Z"))).toBe(false)
+  })
+
+  test("valid after validFrom", () => {
+    const entry = toEntry(
+      makeDoc({ meta: { valid_from: "2026-04-01T00:00:00Z" } }),
+    )
     expect(isValidAt(entry, Date.parse("2026-04-15T00:00:00Z"))).toBe(true)
   })
 })

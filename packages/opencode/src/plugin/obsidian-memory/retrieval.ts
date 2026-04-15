@@ -36,6 +36,13 @@ export interface RetrievalOptions {
   pagerankScores?: Map<string, number>
   /** When false, skip FTS5 completely and use candidate-retrieval tokenizer */
   useFts5?: boolean
+  /**
+   * Files the agent touched in this session (read, edited, created).
+   * Memories whose body or refs mention these files get a boost — inspired
+   * by Windsurf's "active file gets highest weight" and Copilot's JIT
+   * citation verification pattern.
+   */
+  activeFiles?: Set<string>
 }
 
 export interface ScoreWeights {
@@ -84,6 +91,12 @@ export async function rankMemories(
   // Relevance step: run FTS5 (preferred) or fallback to token jaccard
   const relevanceByPath = await computeRelevance(scope, query, entries, useFts)
 
+  // Pre-compute file-match boost: if a memory mentions files the agent is
+  // currently touching, it's contextually much more relevant. This implements
+  // the "active file boost" pattern from Windsurf/Copilot.
+  const activeFileSet = opts.activeFiles
+  const FILE_MATCH_BOOST = 1.5 // multiply score by this when files match
+
   const now = Date.now()
   const ranked: RankedEntry[] = entries.map((entry) => {
     const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
@@ -91,11 +104,25 @@ export async function rankMemories(
     const importance = entry.importance
     const relevance = relevanceByPath.get(entry.doc.path) ?? 0
     const pagerank = opts.pagerankScores?.get(entry.doc.path) ?? 0
-    const score =
+    let score =
       recency * weights.recency +
       importance * weights.importance +
       relevance * weights.relevance +
       pagerank * weights.pagerank
+
+    // File-aware boost: check if memory body/refs reference any actively-touched file
+    if (activeFileSet && activeFileSet.size > 0) {
+      const bodyAndRefs = entry.doc.body + " " + (entry.doc.meta["refs"] ?? "")
+      for (const file of activeFileSet) {
+        // Match by basename or partial path (e.g. "auth.ts" matches "/src/auth.ts")
+        const basename = file.split("/").pop() ?? file
+        if (bodyAndRefs.includes(basename) || bodyAndRefs.includes(file)) {
+          score *= FILE_MATCH_BOOST
+          break
+        }
+      }
+    }
+
     return {
       entry,
       score,
@@ -195,8 +222,9 @@ export async function expandQueryHyde(
   const trimmed = userPrompt.trim()
   if (!trimmed || trimmed.length < 20) return trimmed
 
-  // Cache key: simple prefix hash
-  const cacheKey = trimmed.slice(0, 200)
+  // Cache key: hash of full prompt to avoid collisions on similar prefixes
+  const { createHash: createHashForKey } = await import("crypto")
+  const cacheKey = createHashForKey("sha256").update(trimmed).digest("hex").slice(0, 32)
   const cached = hydeCache.get(cacheKey)
   if (cached && Date.now() - cached.ts < HYDE_CACHE_TTL_MS) {
     return cached.expansion

@@ -271,23 +271,23 @@ export function parseConsolidatorResponse(raw: string): ConsolidateOp[] | null {
       const title = op["target_title"] ?? op["target"]
       const body = op["body"]
       if (Array.isArray(sources) && typeof title === "string" && typeof body === "string") {
-        out.push({
-          type: "merge",
-          sources: sources.filter((s): s is string => typeof s === "string"),
-          target: title,
-          summary: body,
-        })
+        const validated = sources
+          .filter((s): s is string => typeof s === "string")
+          .filter((s) => !path.isAbsolute(s) && !s.includes(".."))
+        if (validated.length > 0) {
+          out.push({ type: "merge", sources: validated, target: title, summary: body })
+        }
       }
     } else if (type === "rewrite") {
       const p = op["path"]
       const body = op["body"]
-      if (typeof p === "string" && typeof body === "string") {
+      if (typeof p === "string" && typeof body === "string" && !path.isAbsolute(p) && !p.includes("..")) {
         out.push({ type: "rewrite", path: p, summary: body })
       }
     } else if (type === "promote") {
       const src = op["source"]
       const reason = op["reason"]
-      if (typeof src === "string") {
+      if (typeof src === "string" && !path.isAbsolute(src) && !src.includes("..")) {
         out.push({
           type: "promote",
           source: src,
@@ -298,7 +298,7 @@ export function parseConsolidatorResponse(raw: string): ConsolidateOp[] | null {
     } else if (type === "delete") {
       const p = op["path"]
       const reason = op["reason"]
-      if (typeof p === "string") {
+      if (typeof p === "string" && !path.isAbsolute(p) && !p.includes("..")) {
         out.push({ type: "delete", path: p, reason: typeof reason === "string" ? reason : "" })
       }
     }

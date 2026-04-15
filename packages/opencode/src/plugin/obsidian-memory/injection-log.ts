@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from "fs/promises"
+import { appendFile, mkdir, readFile, rename, stat } from "fs/promises"
 import { homedir } from "os"
 import path from "path"
 
@@ -56,9 +56,17 @@ export type InjectionLogEntry =
       ok: boolean
     }
 
+const MAX_LOG_SIZE = 50 * 1024 * 1024 // 50MB
+
 export async function logEntry(entry: InjectionLogEntry): Promise<void> {
   try {
     await mkdir(LOG_DIR, { recursive: true })
+    // Rotate if file exceeds max size
+    const st = await stat(LOG_PATH).catch(() => null)
+    if (st && st.size > MAX_LOG_SIZE) {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
+      await rename(LOG_PATH, LOG_PATH.replace(".jsonl", `-${ts}.jsonl`)).catch(() => undefined)
+    }
     await appendFile(LOG_PATH, JSON.stringify(entry) + "\n", "utf8")
   } catch {
     // silent — telemetry failures never block the hot path

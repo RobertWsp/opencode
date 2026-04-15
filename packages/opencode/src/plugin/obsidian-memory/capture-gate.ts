@@ -1,6 +1,7 @@
 import { Log } from "../../util/log"
-import { selectCandidates } from "./candidate-retrieval"
+import { loadAllEntries, selectCandidates } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
+import { isValidAt, titleToSlug } from "./parse-entry"
 import { invalidateNote, rewriteNote, writeNote } from "./vault"
 import type { MemoryKind, Scope } from "./types"
 import { coerceMemoryKind } from "./types"
@@ -44,6 +45,7 @@ interface QueueState {
   timer: NodeJS.Timeout | null
   flushing: boolean
   lastUserPrompt?: string
+  pendingResolvers?: Array<() => void>
 }
 
 interface CircuitBreaker {
@@ -51,12 +53,14 @@ interface CircuitBreaker {
   pausedUntil: number
 }
 
-const DEBOUNCE_MS = 5000
+const DEBOUNCE_MS = 800
 const BATCH_MIN_EVENTS = 1
 const BATCH_MAX_EVENTS = 15
 const MAX_TRIVIAL_BEFORE_FLUSH = 25
 const CIRCUIT_FAIL_THRESHOLD = 3
 const CIRCUIT_PAUSE_MS = 2 * 60 * 1000
+/** Events past this count trigger an IMMEDIATE inline flush */
+const IMMEDIATE_FLUSH_THRESHOLD = 3
 
 export class CaptureGate {
   private queues = new Map<string, QueueState>()
@@ -95,21 +99,51 @@ export class CaptureGate {
 
   /**
    * Enqueue an event. Trivial events are filtered here; meaningful ones
-   * start the debounce timer.
+   * start the debounce timer. Returns a promise that resolves when the
+   * debounced flush (if triggered) finishes — callers that need
+   * single-shot synchronous semantics (opencode run) can await this.
+   *
+   * Three paths are possible:
+   * 1. Trivial event → filter, return empty Promise
+   * 2. Queue < IMMEDIATE_FLUSH_THRESHOLD → schedule debounced flush (await it)
+   * 3. Queue >= IMMEDIATE_FLUSH_THRESHOLD → flush inline immediately
    */
-  enqueue(ev: CaptureEventInput): void {
+  async enqueue(ev: CaptureEventInput): Promise<void> {
     if (!this.enabled) return
     if (this.isPaused()) return
     if (isTrivial(ev)) return
 
     const q = this.getQueue(ev.sessionID)
-    if (q.events.length >= BATCH_MAX_EVENTS) {
-      // Flush immediately when queue is full to avoid unbounded growth
-      this.scheduleFlush(ev.sessionID, 0)
+    q.events.push(ev)
+
+    if (q.events.length >= IMMEDIATE_FLUSH_THRESHOLD || q.events.length >= BATCH_MAX_EVENTS) {
+      // Cancel any pending debounce, flush inline now
+      if (q.timer) {
+        clearTimeout(q.timer)
+        q.timer = null
+      }
+      await this.flush(ev.sessionID)
       return
     }
-    q.events.push(ev)
-    this.scheduleFlush(ev.sessionID, DEBOUNCE_MS)
+
+    // Schedule a debounced flush. All callers in the same debounce window
+    // share a single promise so no caller is left dangling when the timer
+    // is reset by a subsequent enqueue.
+    if (q.timer) clearTimeout(q.timer)
+    if (!q.pendingResolvers) q.pendingResolvers = []
+    const p = new Promise<void>((resolve) => {
+      q.pendingResolvers!.push(resolve)
+    })
+    q.timer = setTimeout(async () => {
+      q.timer = null
+      const resolvers = q.pendingResolvers?.splice(0) ?? []
+      try {
+        await this.flush(ev.sessionID)
+      } finally {
+        for (const resolve of resolvers) resolve()
+      }
+    }, DEBOUNCE_MS)
+    return p
   }
 
   /**
@@ -127,10 +161,13 @@ export class CaptureGate {
     }
 
     q.flushing = true
-    const batch = q.events.splice(0, BATCH_MAX_EVENTS)
+    const batch = q.events.slice(0, BATCH_MAX_EVENTS)
     try {
       await this.runGate(sessionID, batch, q.lastUserPrompt)
+      // Only remove events after successful processing
+      q.events.splice(0, Math.min(q.events.length, BATCH_MAX_EVENTS))
     } catch (err) {
+      // Events remain in queue for retry on next flush
       log.error("flush crashed", { sessionID, error: String(err) })
     } finally {
       q.flushing = false
@@ -155,6 +192,10 @@ export class CaptureGate {
     return q
   }
 
+  /**
+   * Schedule a fire-and-forget flush. Prefer `enqueue` which returns
+   * an awaitable Promise; this helper remains for legacy call sites.
+   */
   private scheduleFlush(sessionID: string, delayMs: number): void {
     const q = this.getQueue(sessionID)
     if (q.timer) clearTimeout(q.timer)
@@ -192,6 +233,19 @@ export class CaptureGate {
     const scope = await this.scopeResolver(sessionID)
     if (!scope) return
 
+    // Load ALL vault entries to build a complete title index for link validation.
+    // This is cheap (~1ms for 100 notes) and ensures links reference real notes.
+    const allEntries = await loadAllEntries(scope)
+    const validEntries = allEntries.filter((e) => isValidAt(e))
+
+    // Build a complete title index: both original titles and slugified forms,
+    // so "JWT Expiry Gotcha" matches links written as "jwt-expiry-gotcha".
+    const vaultTitleIndex = new Map<string, string>()
+    for (const entry of validEntries) {
+      vaultTitleIndex.set(entry.title.toLowerCase(), entry.title)
+      vaultTitleIndex.set(titleToSlug(entry.title), entry.title)
+    }
+
     // Retrieve similar existing memories as candidates for UPDATE/DELETE
     const probeText = [
       userPrompt ?? "",
@@ -208,7 +262,10 @@ export class CaptureGate {
       tags: c.entry.tags,
     }))
 
-    const payload = buildGateUserMessage(batch, userPrompt, indexSnippets)
+    // Collect ALL vault titles so Haiku can create valid links to any note
+    const allTitles = validEntries.map((e) => e.title)
+
+    const payload = buildGateUserMessage(batch, userPrompt, indexSnippets, allTitles)
     const result = await callHaiku({
       model: this.model,
       systemPrompt: GATE_SYSTEM_PROMPT,
@@ -237,14 +294,26 @@ export class CaptureGate {
       return
     }
 
-    // Resolve candidate reference if present
-    const targetCandidate =
-      decision.targetId && decision.targetId.startsWith("cand_")
-        ? indexSnippets[parseInt(decision.targetId.slice(5), 10)]
-        : null
+    // Resolve candidate reference if present (with bounds check)
+    let targetCandidate: typeof indexSnippets[number] | null = null
+    if (decision.targetId && decision.targetId.startsWith("cand_")) {
+      const idx = parseInt(decision.targetId.slice(5), 10)
+      if (idx >= 0 && idx < indexSnippets.length) {
+        targetCandidate = indexSnippets[idx]
+      }
+    }
+
+    // Hard validation: only allow links that match a REAL title in the vault.
+    // Matches against both the original title and its slug form so that
+    // "JWT Expiry Gotcha" ↔ "jwt-expiry-gotcha" both resolve correctly.
+    decision.links = decision.links.filter((link) => {
+      const lower = link.toLowerCase()
+      const slug = titleToSlug(link)
+      return vaultTitleIndex.has(lower) || vaultTitleIndex.has(slug)
+    })
 
     try {
-      await this.applyOp(scope, sessionID, decision, targetCandidate, batch.length, result.durationMs)
+      await this.applyOp(scope, sessionID, decision, targetCandidate, batch, result.durationMs)
     } catch (err) {
       log.error("gate applyOp failed", {
         sessionID,
@@ -259,9 +328,25 @@ export class CaptureGate {
     sessionID: string,
     decision: GateDecision,
     targetCandidate: { path: string; title: string } | null,
-    eventCount: number,
+    batch: CaptureEventInput[],
     durationMs: number,
   ): Promise<void> {
+    const eventCount = batch.length
+
+    // Collect unique file paths from the batch events for the refs field.
+    // These become searchable metadata — the retrieval system can boost
+    // memories that mention files the agent is currently working on.
+    const batchFiles = new Set<string>()
+    for (const ev of batch) {
+      const files = ev.details?.["files"]
+      if (Array.isArray(files)) {
+        for (const f of files) {
+          if (typeof f === "string") batchFiles.add(f)
+        }
+      }
+    }
+    const refsValue = [...batchFiles].slice(0, 20).join(",")
+
     if (decision.op === "NOOP") {
       log.info("gate decided NOOP", { sessionID, reason: decision.reason, events: eventCount })
       return
@@ -286,14 +371,13 @@ export class CaptureGate {
         log.info("gate UPDATE without valid target — falling back to ADD", { sessionID })
         decision.op = "ADD"
       } else {
-        const linksBody = renderLinksBlock(decision.links)
-        const fullBody = decision.body + (linksBody ? "\n\n" + linksBody : "")
         const ok = await rewriteNote(scope, targetCandidate.path, {
-          body: fullBody,
+          body: decision.body,
           meta: {
             tags: decision.tags.join(","),
             importance: String(decision.importance ?? 0.5),
-            links: JSON.stringify(decision.links),
+            links: decision.links.join(","),
+            refs: refsValue,
             "memory-kind": decision.kind,
             "last-merged-count": String(eventCount),
           },
@@ -313,8 +397,8 @@ export class CaptureGate {
     }
 
     // ADD (default + fallback from failed UPDATE)
-    const linksBody = renderLinksBlock(decision.links)
-    const fullBody = decision.body + (linksBody ? "\n\n" + linksBody : "")
+    // Links are stored in frontmatter only — no body wikilinks to avoid
+    // dangling [[links]] in Obsidian when targets don't exist yet.
 
     // Sidecar "suggest" mode: high-importance captures go to wip/suggested/
     // without committing, awaiting user approval via /memory approve.
@@ -326,7 +410,8 @@ export class CaptureGate {
       source: "haiku-gate",
       importance: String(decision.importance ?? ""),
       tags: decision.tags.join(","),
-      links: JSON.stringify(decision.links),
+      links: decision.links.join(","),
+      refs: refsValue,
       "event-count": String(eventCount),
     }
     if (goSuggest) meta["suggested-at"] = new Date().toISOString()
@@ -334,7 +419,7 @@ export class CaptureGate {
     const filepath = await writeNote(scope, {
       title: decision.title,
       meta,
-      body: fullBody,
+      body: decision.body,
       targetDir: goSuggest ? scope.suggestedDir : scope.notesDir,
       // No commit when in suggest mode — user decides via approve/reject
       skipCommit: goSuggest,
@@ -353,17 +438,6 @@ export class CaptureGate {
       duration: durationMs,
     })
   }
-}
-
-/**
- * Render a Markdown bullet list of wikilinks for embedding in the body.
- * Keeps the format consistent so the `parseLinks` reader picks them up
- * alongside the frontmatter `links` field.
- */
-function renderLinksBlock(links: string[]): string {
-  if (!links || links.length === 0) return ""
-  const bullets = links.map((link) => `- [[${link}]]`).join("\n")
-  return "## Related\n" + bullets
 }
 
 // ─── heuristic pre-filter ─────────────────────────────────────────────
@@ -409,8 +483,11 @@ Be AGGRESSIVE with NOOP. Only save surprising gotchas, non-obvious decisions,
 procedural skills (how-to), or facts the next session would clearly benefit
 from knowing. Skip routine file reads, greps, normal edits.
 
-For ADD and UPDATE, you MUST enumerate 2-5 wikilinks to related candidates
-(use their "title" field) so the vault becomes a connected graph.
+CRITICAL: The "links" field must ONLY contain titles of notes that ALREADY
+EXIST in the vault. You will be given a complete list of all vault note titles
+below. Pick 0-5 that are related to the new memory. Do NOT invent titles —
+every link must exactly match a title from the "All vault titles" list. If the
+vault is empty, "links" MUST be an empty array [].
 
 Categorize "kind" as one of: fact, decision, gotcha, skill, episode, convention.
 
@@ -422,9 +499,9 @@ Output STRICTLY valid JSON matching this shape, no markdown fences, no prose:
   "targetId": "cand_0" | "cand_1" | ... (only if UPDATE or DELETE),
   "kind": "fact",
   "title": "short kebab-ish title (ADD/UPDATE)",
-  "body": "markdown body <= 40 lines (ADD/UPDATE, cite code paths)",
+  "body": "markdown body <= 40 lines (ADD/UPDATE). IMPORTANT: at the end of the body, include a 'Refs:' section listing the specific file paths from the tool events that are relevant, e.g. '\\nRefs:\\n- src/auth/middleware.ts\\n- src/config.ts'. Do NOT include a Related section — links are handled via the links field.",
   "tags": ["tag1", "tag2"],
-  "links": ["candidate title 1", "candidate title 2"],
+  "links": ["exact title from the 'All vault titles' list"],
   "supersedes": "candidate title" (only DELETE, optional),
   "importance": 0.7
 }
@@ -437,6 +514,7 @@ function buildGateUserMessage(
   batch: CaptureEventInput[],
   userPrompt: string | undefined,
   candidates: Array<{ id: string; title: string; description: string; tags: string[] }>,
+  allVaultTitles: string[] = [],
 ): string {
   const parts: string[] = []
   if (userPrompt) {
@@ -450,6 +528,19 @@ function buildGateUserMessage(
       const tags = c.tags.length > 0 ? ` #${c.tags.join(" #")}` : ""
       parts.push(`- ${c.id}: "${c.title}" — ${c.description}${tags}`)
     }
+    parts.push("")
+  }
+
+  // Provide the complete list of vault note titles so the LLM can create
+  // valid links to ANY existing note, not just the top-K candidates.
+  if (allVaultTitles.length > 0) {
+    parts.push(`All vault titles (${allVaultTitles.length}) — use these EXACT titles for the "links" field:`)
+    for (const title of allVaultTitles) {
+      parts.push(`- "${title}"`)
+    }
+    parts.push("")
+  } else {
+    parts.push("All vault titles: (none — vault is empty, set links to [])")
     parts.push("")
   }
 

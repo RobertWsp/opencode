@@ -88,6 +88,11 @@ export function formatBlock(
         noteLines.push(heading, note.body.trim())
       }
     }
+    // Surface truncation: let the LLM know when notes were dropped due to budget
+    const dropped = validNotes.length - notesToRender.length
+    if (dropped > 0) {
+      noteLines.push(`\n_(${dropped} older note${dropped > 1 ? "s" : ""} omitted due to byte budget — use /memory list to see all)_`)
+    }
     sections.push(noteLines.join("\n"))
   }
 
@@ -120,7 +125,11 @@ function truncateNotes(notes: MemoryDoc[], usedBytes: number, maxBytes: number):
     const heading = when ? `### ${when} — ${title}` : `### ${title}`
     const rendered = heading + "\n" + note.body.trim()
     const size = Buffer.byteLength(rendered, "utf8")
-    if (running + size > budget) break
+    if (running + size > budget) {
+      // Always include at least the first (newest) note even if oversized
+      if (result.length === 0) result.push(note)
+      break
+    }
     result.push(note)
     running += size
   }
