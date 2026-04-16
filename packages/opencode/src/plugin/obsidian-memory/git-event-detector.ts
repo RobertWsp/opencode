@@ -16,16 +16,14 @@ import type { CaptureEventInput } from "./capture-gate"
  */
 
 export interface GitEventCandidate {
-  /** The git subcommand (`checkout`, `commit`, ...) */
   subcommand: string
-  /** Free-form parsed arguments for the subcommand */
   args: string[]
-  /** Short human-readable summary for the capture event */
   summary: string
-  /** Suggested memory-kind */
   kind: "episode" | "merge" | "revert"
   hash?: string
   issueRefs?: string[]
+  conflicts?: string[]
+  filesChanged?: string[]
 }
 
 /**
@@ -48,6 +46,7 @@ const INTERESTING_SUBCOMMANDS = new Set([
   "tag",
   "stash",
   "worktree",
+  "branch",
 ])
 
 export function extractIssueRefs(message: string): string[] {
@@ -135,7 +134,11 @@ export function detectGitEvent(
   }
   if (!subcommand || !INTERESTING_SUBCOMMANDS.has(subcommand)) return null
 
-  // Remaining non-flag tokens after the subcommand
+  if (subcommand === "branch") {
+    const hasDelete = tokens.some((t) => t === "-d" || t === "-D" || t === "--delete")
+    if (!hasDelete) return null
+  }
+
   const args: string[] = []
   let after = false
   for (const t of tokens.slice(gitIdx + 1)) {
@@ -170,6 +173,14 @@ export function detectGitEvent(
   const result: GitEventCandidate = { subcommand, args, summary, kind }
   if (hash !== undefined) result.hash = hash
   if (issueRefs !== undefined) result.issueRefs = issueRefs
+
+  if (stdoutExcerpt) {
+    const conflicts = extractConflicts(stdoutExcerpt)
+    if (conflicts.length > 0) result.conflicts = conflicts
+    const changed = extractFilesChanged(stdoutExcerpt)
+    if (changed.length > 0) result.filesChanged = changed
+  }
+
   return result
 }
 
@@ -221,6 +232,9 @@ function formatSummary(
     case "worktree":
       base = `worktree${tail ? ` ${tail}` : ""}`
       break
+    case "branch":
+      base = `branch deleted${tail ? `: ${tail}` : ""}`
+      break
     default:
       base = `git ${subcommand}${tail ? ` ${tail}` : ""}`
   }
@@ -246,6 +260,8 @@ export function toCaptureEvent(
   }
   if (candidate.hash !== undefined) details.hash = candidate.hash
   if (candidate.issueRefs !== undefined) details.issueRefs = candidate.issueRefs
+  if (candidate.conflicts !== undefined) details.conflicts = candidate.conflicts
+  if (candidate.filesChanged !== undefined) details.files = candidate.filesChanged
   if (candidate.kind !== "episode") details.kind = candidate.kind
   return {
     kind: "tool.after",
@@ -254,4 +270,77 @@ export function toCaptureEvent(
     details,
     timestamp: Date.now(),
   }
+}
+
+export function extractConflicts(output: string): string[] {
+  if (!output) return []
+  const files = new Set<string>()
+  for (const line of output.split("\n")) {
+    const m = line.match(/^CONFLICT\s+\([^)]+\):\s+Merge conflict in\s+(.+)/)
+    if (m) files.add(m[1].trim())
+    const u = line.match(/^UU\s+(.+)/)
+    if (u) files.add(u[1].trim())
+  }
+  return [...files]
+}
+
+export function extractFilesChanged(output: string): string[] {
+  if (!output) return []
+  const files = new Set<string>()
+  for (const line of output.split("\n")) {
+    const m = line.match(/^\s+(.+?)\s+\|\s+\d+/)
+    if (m) files.add(m[1].trim())
+    const c = line.match(/^ (create|delete) mode \d+ (.+)/)
+    if (c) files.add(c[2].trim())
+  }
+  return [...files]
+}
+
+export function detectGhEvent(
+  command: string,
+  stdoutExcerpt?: string,
+): GitEventCandidate | null {
+  if (!command || typeof command !== "string") return null
+  const tokens = splitCommand(command.trim())
+  if (tokens.length < 3) return null
+
+  const ghIdx = tokens.findIndex((t) => t === "gh" || t.endsWith("/gh"))
+  if (ghIdx === -1) return null
+
+  const sub1 = tokens[ghIdx + 1]
+  const sub2 = tokens[ghIdx + 2]
+  if (!sub1 || !sub2) return null
+
+  if (sub1 === "pr" && sub2 === "create") {
+    const title = extractFlag(tokens, "--title") ?? extractFlag(tokens, "-t") ?? "untitled"
+    return { subcommand: "pr-create", args: [title], summary: `PR created: ${title}`.slice(0, 200), kind: "episode" }
+  }
+
+  if (sub1 === "pr" && sub2 === "merge") {
+    const num = tokens[ghIdx + 3] ?? ""
+    return { subcommand: "pr-merge", args: [num], summary: `PR merged: ${num}`.slice(0, 200), kind: "merge" }
+  }
+
+  if (sub1 === "pr" && sub2 === "checkout") {
+    const num = tokens[ghIdx + 3] ?? ""
+    return { subcommand: "pr-checkout", args: [num], summary: `PR checked out: ${num}`.slice(0, 200), kind: "episode" }
+  }
+
+  if (sub1 === "pr" && sub2 === "close") {
+    const num = tokens[ghIdx + 3] ?? ""
+    return { subcommand: "pr-close", args: [num], summary: `PR closed: ${num}`.slice(0, 200), kind: "episode" }
+  }
+
+  if (sub1 === "issue" && sub2 === "create") {
+    const title = extractFlag(tokens, "--title") ?? extractFlag(tokens, "-t") ?? ""
+    return { subcommand: "issue-create", args: [title], summary: `Issue created: ${title}`.slice(0, 200), kind: "episode" }
+  }
+
+  return null
+}
+
+function extractFlag(tokens: string[], flag: string): string | undefined {
+  const idx = tokens.indexOf(flag)
+  if (idx === -1 || idx + 1 >= tokens.length) return undefined
+  return tokens[idx + 1]
 }

@@ -224,18 +224,24 @@ async function mergeBack(vaultRoot: string, worktreePath: string): Promise<boole
   const newTipResult = await git(["rev-parse", "HEAD"], { cwd: worktreePath })
   const newTip = newTipResult.text().trim()
 
-  // Use cherry-pick -n (no commit) from the main vault worktree — this
-  // transfers the changes without merge commits, keeping history linear.
-  // If main vault is "dirty" from concurrent edits this will fail and
-  // we accept the loss (the gate prevents concurrent reflections anyway).
+  let stashed = false
+  const dirty = await git(["diff", "--quiet"], { cwd: vaultRoot })
+  if (dirty.exitCode !== 0) {
+    const stash = await git(["stash", "push", "-m", "omem-reflection-autostash"], { cwd: vaultRoot })
+    stashed = stash.exitCode === 0
+  }
+
   const cherry = await git(["cherry-pick", "-n", newTip], { cwd: vaultRoot })
   if (cherry.exitCode !== 0) {
-    // Abort on conflict — reflection shouldn't clobber user edits
     await git(["cherry-pick", "--abort"], { cwd: vaultRoot }).catch(() => undefined)
+    if (stashed) await git(["stash", "pop"], { cwd: vaultRoot }).catch(() => undefined)
     return false
   }
   const diff = await git(["diff", "--cached", "--quiet"], { cwd: vaultRoot })
-  if (diff.exitCode === 0) return true
+  if (diff.exitCode === 0) {
+    if (stashed) await git(["stash", "pop"], { cwd: vaultRoot }).catch(() => undefined)
+    return true
+  }
   const commit = await git(
     [
       "commit",
@@ -246,6 +252,7 @@ async function mergeBack(vaultRoot: string, worktreePath: string): Promise<boole
     ],
     { cwd: vaultRoot },
   )
+  if (stashed) await git(["stash", "pop"], { cwd: vaultRoot }).catch(() => undefined)
   return commit.exitCode === 0
 }
 

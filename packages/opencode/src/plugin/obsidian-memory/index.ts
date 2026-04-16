@@ -5,7 +5,7 @@ import * as Commands from "./commands"
 import { formatBlock, type RefHealthMap } from "./injector"
 import { logEntry } from "./injection-log"
 import { verifyDocRefs } from "./refs"
-import { detectGitEvent, toCaptureEvent } from "./git-event-detector"
+import { detectGitEvent, detectGhEvent, toCaptureEvent } from "./git-event-detector"
 import { computePageRank, seedsFromPrompt } from "./pagerank"
 import { noteSessionIdle, runReflection } from "./reflection-scheduler"
 import { isValidAt, toEntry } from "./parse-entry"
@@ -527,10 +527,8 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         const args = (hookInput as unknown as { args?: { command?: string } }).args
         const command = args?.command
         if (typeof command === "string") {
-          const candidate = detectGitEvent(
-            command,
-            typeof hookOutput.output === "string" ? hookOutput.output : undefined,
-          )
+          const output = typeof hookOutput.output === "string" ? hookOutput.output : undefined
+          const candidate = detectGitEvent(command, output) ?? detectGhEvent(command, output)
           if (candidate) {
             await captureGate.enqueue(toCaptureEvent(candidate, hookInput.sessionID))
           }
