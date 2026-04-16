@@ -658,7 +658,7 @@ export function MessageTimeline(props: {
                           />
                         </Show>
                       </Show>
-                    </Show>
+                    </div>
                   </div>
                   <Show when={sessionID()}>
                     {(id) => (

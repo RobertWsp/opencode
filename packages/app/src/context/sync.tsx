@@ -395,39 +395,20 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             parts: input.parts,
           })
         },
-        async sync(sessionID: string) {
+        async sync(sessionID: string, opts?: { force?: boolean }) {
           const directory = sdk.directory
           const client = sdk.client
           const [store, setStore] = globalSync.child(directory)
           const key = keyFor(directory, sessionID)
-          const hasSession = Binary.search(store.session, sessionID, (s) => s.id).found
 
           touch(directory, setStore, sessionID)
 
-          if (store.message[sessionID] !== undefined && hasSession && meta.limit[key] !== undefined) return
+          return runInflight(inflight, key, async () => {
+            const hasSession = Binary.search(store.session, sessionID, (s) => s.id).found
+            const cached = store.message[sessionID] !== undefined && meta.limit[key] !== undefined
+            if (cached && hasSession && !opts?.force) return
 
-          const limit = meta.limit[key] ?? messagePageSize
-
-          const sessionReq = hasSession
-            ? Promise.resolve()
-            : retry(() => client.session.get({ sessionID })).then((session) => {
-                if (!tracked(directory, sessionID)) return
-                const data = session.data
-                if (!data) return
-                setStore(
-                  "session",
-                  produce((draft) => {
-                    const match = Binary.search(draft, sessionID, (s) => s.id)
-                    if (match.found) {
-                      draft[match.index] = data
-                      return
-                    }
-                    draft.splice(match.index, 0, data)
-                  }),
-                )
-              })
-
-            const limit = meta.limit[key] ?? initialMessagePageSize
+            const limit = meta.limit[key] ?? messagePageSize
             const sessionReq =
               hasSession && !opts?.force
                 ? Promise.resolve()
@@ -461,8 +442,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
             await Promise.all([sessionReq, messagesReq])
           })
-
-          return runInflight(inflight, key, () => Promise.all([sessionReq, messagesReq]).then(() => {}))
         },
         async diff(sessionID: string) {
           const directory = sdk.directory

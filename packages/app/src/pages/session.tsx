@@ -1274,21 +1274,6 @@ export default function Page() {
       attachmentName: language.t("common.attachment"),
     })
 
-    historyFillFrame = requestAnimationFrame(() => {
-      historyFillFrame = undefined
-
-      if (!params.id || !messagesReady()) return
-      if (autoScroll.userScrolled() || historyLoading()) return
-
-      const el = scroller
-      if (!el) return
-      if (el.scrollHeight > el.clientHeight + 1) return
-      if (historyWindow.turnStart() <= 0 && !historyMore()) return
-
-      void historyWindow.loadAndReveal()
-    })
-  }
-
   const merge = (next: NonNullable<ReturnType<typeof info>>) =>
     sync.set("session", (list) => {
       const idx = list.findIndex((item) => item.id === next.id)

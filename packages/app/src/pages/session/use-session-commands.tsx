@@ -410,33 +410,23 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
           tabs().close(tab)
         },
       }),
-      contextCommand({
-        id: "context.addSelection",
-        title: language.t("command.context.addSelection"),
-        description: language.t("command.context.addSelection.description"),
-        keybind: "mod+shift+l",
-        disabled: !canAddSelectionContext(),
-        onSelect: () => {
-          const tab = activeFileTab()
-          if (!tab) return
-          const path = file.pathFromTab(tab)
-          if (!path) return
-
-            showToast({
-              title: existing
-                ? language.t("session.share.copy.copied")
-                : language.t("toast.session.share.success.title"),
-              description: language.t("toast.session.share.success.description"),
-              variant: "success",
-            })
-          }
-
+      sessionCommand({
+        id: "session.share",
+        title: language.t("command.session.share"),
+        description: language.t("command.session.share.description"),
+        keybind: "mod+shift+c",
+        disabled: !params.id,
+        onSelect: async () => {
           const existing = info()?.share?.url
           if (existing) {
             await copy(existing, true)
+            showToast({
+              title: language.t("session.share.copy.copied"),
+              description: language.t("toast.session.share.success.description"),
+              variant: "success",
+            })
             return
           }
-
           const url = await sdk.client.session
             .share({ sessionID: params.id })
             .then((res) => res.data?.share?.url)
@@ -449,8 +439,12 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
             })
             return
           }
-
           await copy(url, false)
+          showToast({
+            title: language.t("toast.session.share.success.title"),
+            description: language.t("toast.session.share.success.description"),
+            variant: "success",
+          })
         },
       }),
       sessionCommand({
