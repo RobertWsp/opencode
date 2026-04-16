@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect } from "bun:test"
 import { buildSummary, formatSummaryNote } from "../../../src/plugin/obsidian-memory/session-summary"
 import type { CaptureEventInput } from "../../../src/plugin/obsidian-memory/capture-gate"
 

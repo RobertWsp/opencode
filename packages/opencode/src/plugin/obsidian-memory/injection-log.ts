@@ -29,7 +29,7 @@ export type InjectionLogEntry =
       bytes: number
       fingerprint: string
       cached: boolean
-      style: "full" | "index"
+      style: "full" | "index" | "progressive"
     }
   | {
       kind: "capture"
