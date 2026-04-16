@@ -22,7 +22,7 @@ import { runAutoInit, shouldAutoInit } from "./auto-init"
 const log = Log.create({ service: "plugin.obsidian-memory" })
 
 const CACHE_TTL_MS = 30_000
-const DEFAULT_MAX_BYTES = 4096
+const DEFAULT_MAX_BYTES = 6000
 const DEFAULT_MAX_NOTES = 20
 const DEFAULT_CAPTURE_MODEL = "claude-haiku-4-5-20251001"
 const DEFAULT_CONSOLIDATE_MODEL = "claude-sonnet-4-5-20250929"
@@ -101,7 +101,11 @@ async function maybeRank(
   store?: VectorStore,
 ): Promise<VaultDocs> {
   if (!cfg.smartRetrieval || docs.notes.length === 0) return docs
-  const query = cfg.hydeExpansion
+  // Skip HyDE when vector embeddings are available — hybrid search
+  // (BM25 + cosine) already does semantic matching, making the extra
+  // Haiku call redundant (~$0.0006 + 300-500ms per cache miss).
+  const useHyde = cfg.hydeExpansion && !embedder
+  const query = useHyde
     ? await expandQueryHyde(userPrompt, cfg.captureModel).catch(() => userPrompt)
     : userPrompt
   if (!query.trim()) return docs
