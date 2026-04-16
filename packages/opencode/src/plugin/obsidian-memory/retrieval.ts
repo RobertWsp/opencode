@@ -155,8 +155,9 @@ async function computeRelevance(
   if (useFts) {
     try {
       const index = new VaultIndex(scope.vaultRoot)
-      // Lazy rebuild if index is empty and we have entries to search.
-      if (index.count() === 0 && entries.length > 0) {
+      // Lazy rebuild if index is empty OR if filesystem has more files
+      // than indexed (external edits, new auto-captures not yet upserted).
+      if (entries.length > 0 && (index.count() === 0 || (await index.isStale(scope)))) {
         await index.rebuild(scope)
       }
       const hits = index.search(query, Math.max(entries.length, 50))

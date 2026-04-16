@@ -222,14 +222,20 @@ export class VaultIndex {
       scope.repoSharedPath,
       scope.branchSharedPath,
     ]
-    try {
-      const entries = await fs.readdir(scope.notesDir)
-      for (const name of entries) {
-        if (name.endsWith(".md")) files.push(path.join(scope.notesDir, name))
+
+    const scanDir = async (dir: string): Promise<void> => {
+      try {
+        const entries = await fs.readdir(dir)
+        for (const name of entries) {
+          if (name.endsWith(".md")) files.push(path.join(dir, name))
+        }
+      } catch {
+        // dir missing, fine
       }
-    } catch {
-      // notes dir missing, fine
     }
+
+    await scanDir(scope.notesDir)
+    if (scope.suggestedDir) await scanDir(scope.suggestedDir)
 
     let inserted = 0
     for (const filepath of files) {
@@ -240,6 +246,47 @@ export class VaultIndex {
     }
     log.info("index rebuilt", { inserted, scope: scope.repoSlug })
     return inserted
+  }
+
+  /**
+   * Compare DB row count against filesystem .md count. Rebuild is cheap
+   * (~10ms for 100 notes), so we trigger it whenever the counts diverge
+   * by more than a small tolerance. Catches cases where files are added
+   * externally (manual edit, git pull) without triggering the upsert path.
+   */
+  async isStale(scope: Scope): Promise<boolean> {
+    this.open()
+    const indexCount = this.count()
+
+    let fsCount = 0
+    const countMd = async (p: string): Promise<void> => {
+      try {
+        const stat = await fs.stat(p)
+        if (stat.isFile() && p.endsWith(".md")) fsCount++
+      } catch {
+        // missing, ok
+      }
+    }
+    const countDir = async (dir: string): Promise<void> => {
+      try {
+        const entries = await fs.readdir(dir)
+        for (const name of entries) {
+          if (name.endsWith(".md")) fsCount++
+        }
+      } catch {
+        // dir missing, ok
+      }
+    }
+
+    await Promise.all([
+      countMd(scope.systemSharedPath),
+      countMd(scope.repoSharedPath),
+      countMd(scope.branchSharedPath),
+      countDir(scope.notesDir),
+      scope.suggestedDir ? countDir(scope.suggestedDir) : Promise.resolve(),
+    ])
+
+    return indexCount !== fsCount
   }
 
   /**
