@@ -124,4 +124,80 @@ describe("createVectorStore", () => {
     expect(results[0]!.score).toBeCloseTo(1.0)
     s2.close()
   })
+
+  test("hasHash returns false for missing path", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    expect(store.hasHash("missing.md", "abc")).toBe(false)
+    store.close()
+  })
+
+  test("hasHash returns true for matching hash", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    store.upsert("note.md", vec([1, 0, 0, 0]), "hash123")
+    expect(store.hasHash("note.md", "hash123")).toBe(true)
+    store.close()
+  })
+
+  test("hasHash returns false for different hash", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    store.upsert("note.md", vec([1, 0, 0, 0]), "hash123")
+    expect(store.hasHash("note.md", "hash456")).toBe(false)
+    store.close()
+  })
+
+  test("upsert updates hash when content changes", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    store.upsert("note.md", vec([1, 0, 0, 0]), "v1")
+    expect(store.hasHash("note.md", "v1")).toBe(true)
+    store.upsert("note.md", vec([0, 1, 0, 0]), "v2")
+    expect(store.hasHash("note.md", "v1")).toBe(false)
+    expect(store.hasHash("note.md", "v2")).toBe(true)
+    store.close()
+  })
+
+  test("paths returns all stored paths", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    store.upsert("a.md", vec([1, 0, 0, 0]))
+    store.upsert("b.md", vec([0, 1, 0, 0]))
+    store.upsert("c.md", vec([0, 0, 1, 0]))
+    const all = store.paths()
+    expect(all.sort()).toEqual(["a.md", "b.md", "c.md"])
+    store.close()
+  })
+
+  test("paths returns empty for empty store", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    expect(store.paths()).toEqual([])
+    store.close()
+  })
+
+  test("remove cleans up from paths list", async () => {
+    const db = await tmpdb()
+    const store = createVectorStore(db)
+    store.upsert("a.md", vec([1, 0, 0, 0]))
+    store.upsert("b.md", vec([0, 1, 0, 0]))
+    store.remove("a.md")
+    expect(store.paths()).toEqual(["b.md"])
+    store.close()
+  })
+
+  test("content_hash column added to existing db without it", async () => {
+    const db = await tmpdb()
+    const { Database } = await import("bun:sqlite")
+    const raw = new Database(db, { create: true })
+    raw.exec("CREATE TABLE memory_vectors (path TEXT PRIMARY KEY, vector BLOB NOT NULL, updated_at INTEGER NOT NULL)")
+    raw.exec("INSERT INTO memory_vectors VALUES ('old.md', X'00000000', 0)")
+    raw.close()
+    const store = createVectorStore(db)
+    expect(store.hasHash("old.md", "")).toBe(true)
+    store.upsert("old.md", vec([1, 0, 0, 0]), "newhash")
+    expect(store.hasHash("old.md", "newhash")).toBe(true)
+    store.close()
+  })
 })

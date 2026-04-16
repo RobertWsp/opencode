@@ -345,12 +345,25 @@ function fileBoost(entry: MemoryEntry, active?: Set<string>): number {
   return 0
 }
 
+const queryCache = new Map<string, { vector: Float32Array; ts: number }>()
+const QUERY_CACHE_TTL = 5 * 60 * 1000
+
 async function embedQuery(embedder: Embedder | undefined | null, query: string): Promise<Float32Array | null> {
   if (!embedder || !query.trim()) return null
+  const { createHash } = await import("crypto")
+  const key = createHash("sha256").update(query).digest("hex").slice(0, 16)
+  const hit = queryCache.get(key)
+  if (hit && Date.now() - hit.ts < QUERY_CACHE_TTL) return hit.vector
   try {
     const results = await embedder.embed([query], "query")
-    return results[0]?.vector ?? null
+    const v = results[0]?.vector ?? null
+    if (v) queryCache.set(key, { vector: v, ts: Date.now() })
+    return v
   } catch {
     return null
   }
+}
+
+export function clearQueryCache(): void {
+  queryCache.clear()
 }

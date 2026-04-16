@@ -217,7 +217,6 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   const sessionEvents = new Map<string, CaptureEventInput[]>()
   let embedder: Embedder | null = null
   let vectorStore: VectorStore | undefined
-  const embeddedPaths = new Set<string>()
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
@@ -404,18 +403,24 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           if (embedder && vectorStore) {
             const store = vectorStore
             const emb = embedder
-            const toEmbed = docs.notes.filter((n) => !embeddedPaths.has(n.path))
+            const currentPaths = new Set(docs.notes.map((n) => n.path))
+            for (const p of store.paths()) {
+              if (!currentPaths.has(p)) store.remove(p)
+            }
+            const toEmbed = docs.notes.filter((n) => {
+              const text = `${n.meta["title"] ?? ""} ${n.body}`.slice(0, 8000)
+              const hash = shortHash(text)
+              return !store.hasHash(n.path, hash)
+            })
             if (toEmbed.length > 0) {
               void Promise.allSettled(
                 toEmbed.map(async (note) => {
                   const text = `${note.meta["title"] ?? ""} ${note.body}`.slice(0, 8000)
                   if (!text.trim()) return
+                  const hash = shortHash(text)
                   const results = await emb.embed([text]).catch(() => null)
                   const v = results?.[0]?.vector
-                  if (v) {
-                    store.upsert(note.path, v)
-                    embeddedPaths.add(note.path)
-                  }
+                  if (v) store.upsert(note.path, v, hash)
                 }),
               )
             }

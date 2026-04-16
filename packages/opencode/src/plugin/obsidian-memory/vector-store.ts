@@ -4,13 +4,16 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_vectors (
   path TEXT PRIMARY KEY,
   vector BLOB NOT NULL,
+  content_hash TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );
 `
 
 export interface VectorStore {
-  upsert(path: string, vector: Float32Array): void
+  upsert(path: string, vector: Float32Array, hash?: string): void
+  hasHash(path: string, hash: string): boolean
   search(query: Float32Array, limit: number): Array<{ path: string; score: number }>
+  paths(): string[]
   remove(path: string): void
   close(): void
 }
@@ -32,12 +35,24 @@ export function createVectorStore(dbPath: string): VectorStore {
   const db = new Database(dbPath, { create: true })
   db.exec("PRAGMA journal_mode = WAL")
   db.exec(SCHEMA)
+  try {
+    db.exec("ALTER TABLE memory_vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+  } catch {
+    void 0
+  }
 
   return {
-    upsert(path, vector) {
+    upsert(path, vector, hash) {
       db.query(
-        "INSERT OR REPLACE INTO memory_vectors (path, vector, updated_at) VALUES (?, ?, ?)",
-      ).run(path, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength), Date.now())
+        "INSERT OR REPLACE INTO memory_vectors (path, vector, content_hash, updated_at) VALUES (?, ?, ?, ?)",
+      ).run(path, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength), hash ?? "", Date.now())
+    },
+
+    hasHash(path, hash) {
+      const row = db.query("SELECT content_hash FROM memory_vectors WHERE path = ?").get(path) as
+        | { content_hash: string }
+        | null
+      return row !== null && row.content_hash === hash
     },
 
     search(query, limit) {
@@ -54,6 +69,10 @@ export function createVectorStore(dbPath: string): VectorStore {
         })
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
+    },
+
+    paths() {
+      return (db.query("SELECT path FROM memory_vectors").all() as Array<{ path: string }>).map((r) => r.path)
     },
 
     remove(path) {
