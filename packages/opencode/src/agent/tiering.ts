@@ -8,7 +8,7 @@ export namespace Tiering {
 
   export const DEFAULTS: Record<Tier, TierMap> = {
     quality: {
-      anthropic: "claude-opus-4-6",
+      anthropic: "claude-opus-4-7",
       openai: "gpt-5",
       google: "gemini-2.5-pro",
     },
