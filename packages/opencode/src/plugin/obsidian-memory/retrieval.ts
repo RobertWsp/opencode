@@ -2,6 +2,7 @@ import { Log } from "../../util/log"
 import { loadAllEntries, tokenize as candidateTokenize } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
 import { isValidAt } from "./parse-entry"
+import { filterActive } from "./forgetting"
 import type { MemoryEntry, Scope } from "./types"
 import { VaultIndex, type FtsHit } from "./vault-index"
 import type { VectorStore } from "./vector-store"
@@ -87,7 +88,8 @@ export async function rankMemories(
   const weights = { ...DEFAULT_WEIGHTS, ...(opts.weights ?? {}) }
   const useFts = opts.useFts5 !== false
 
-  const entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  const allEntries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  const entries = filterActive(allEntries)
   if (entries.length === 0) return []
 
   // Relevance step: run FTS5 (preferred) or fallback to token jaccard

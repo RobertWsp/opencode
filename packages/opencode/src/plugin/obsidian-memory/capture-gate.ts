@@ -7,6 +7,7 @@ import { detectContradiction, markSuperseded } from "./contradiction"
 import { isValidAt, titleToSlug, toEntry } from "./parse-entry"
 import { enrichWithTaskRefs } from "./task-linker"
 import { invalidateNote, rewriteNote, writeNote } from "./vault"
+import { stripPrivate, sanitizeRecord } from "./privacy"
 import type { MemoryEntry, MemoryKind, Scope } from "./types"
 import { coerceMemoryKind } from "./types"
 
@@ -122,6 +123,9 @@ export class CaptureGate {
     if (!this.enabled) return
     if (this.isPaused()) return
     if (isTrivial(ev)) return
+
+    ev.summary = stripPrivate(ev.summary)
+    ev.details = sanitizeRecord(ev.details)
 
     const q = this.getQueue(ev.sessionID)
     if (isFilterable(ev, q)) return

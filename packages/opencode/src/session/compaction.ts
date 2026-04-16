@@ -210,6 +210,11 @@ When constructing the summary, stick to this template:
 ## Relevant files / directories
 
 [Structured list of files read/edited/created. Plain strings only — do NOT include tool_use IDs or tool call renderings.]
+IMPORTANT: This section is for INTERNAL CONTEXT ONLY. The next agent must NOT echo or list these files in its visible response to the user. File tracking is handled automatically by the system.
+
+## Pending user messages
+
+[If the user sent messages during this conversation that have NOT been fully addressed, reproduce their EXACT text here so the next agent can respond to them. Do NOT paraphrase or summarize — copy the user's words verbatim.]
 
 ## Must re-verify before use
 

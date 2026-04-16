@@ -275,6 +275,66 @@ function textOf(msg: { info: unknown; parts: unknown[] } | undefined): string {
   return chunks.join("\n")
 }
 
+/**
+ * `/memory search <query>` — full-text search across all notes in the current scope.
+ */
+export async function search(scope: Scope, query: string): Promise<CommandResult> {
+  if (!query.trim()) {
+    return { ok: false, text: "[memory] usage: /memory search <query>" }
+  }
+  const term = query.trim().toLowerCase()
+  const results: string[] = []
+
+  for (const dir of [scope.notesDir, scope.suggestedDir]) {
+    const entries = await fs.readdir(dir).catch(() => [] as string[])
+    for (const name of entries.filter((e) => e.endsWith(".md"))) {
+      const full = path.join(dir, name)
+      const content = await fs.readFile(full, "utf8").catch(() => "")
+      if (!content.toLowerCase().includes(term)) continue
+      const p = parseFrontmatter(content)
+      const title = p.meta["title"] || name
+      const rel = path.relative(scope.vaultRoot, full)
+      results.push(`  ${rel}  ${title}`)
+    }
+  }
+
+  if (results.length === 0) {
+    return { ok: true, text: `[memory] no matches for "${query.trim()}"` }
+  }
+  return { ok: true, text: [`[memory] ${results.length} match(es):`, ...results].join("\n") }
+}
+
+/**
+ * `/memory health` — vault health: note count, total size, stale refs.
+ */
+export async function health(scope: Scope): Promise<CommandResult> {
+  const lines: string[] = [`[memory] health for ${scope.repoSlug}/${scope.branchSlug}`]
+  let count = 0
+  let bytes = 0
+
+  const entries = await fs.readdir(scope.notesDir).catch(() => [] as string[])
+  for (const name of entries.filter((e) => e.endsWith(".md"))) {
+    const st = await fs.stat(path.join(scope.notesDir, name)).catch(() => null)
+    if (!st) continue
+    count++
+    bytes += st.size
+  }
+
+  const pending = await fs.readdir(scope.suggestedDir).catch(() => [] as string[])
+  const pendingCount = pending.filter((e) => e.endsWith(".md")).length
+
+  const repoMd = await fs.stat(scope.repoSharedPath).then(() => true).catch(() => false)
+  const branchMd = await fs.stat(scope.branchSharedPath).then(() => true).catch(() => false)
+
+  lines.push(`  notes: ${count} (${(bytes / 1024).toFixed(1)} KB)`)
+  lines.push(`  pending suggestions: ${pendingCount}`)
+  lines.push(`  repo MEMORY.md: ${repoMd ? "exists" : "missing"}`)
+  lines.push(`  branch MEMORY.md: ${branchMd ? "exists" : "missing"}`)
+  lines.push(`  vault root: ${scope.vaultRoot}`)
+
+  return { ok: true, text: lines.join("\n") }
+}
+
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)

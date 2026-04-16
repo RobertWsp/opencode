@@ -145,3 +145,8 @@ Remember that todo lists must always be written in markdown format and must alwa
 If the user tells you to stage and commit, you may do so. 
 
 You are NEVER allowed to stage and commit files automatically.
+
+# Output Rules
+- NEVER append a "Files changed" or similar summary listing modified files at the end of your responses. The system tracks file changes automatically.
+- Do NOT echo file paths from compaction summaries or tool results as a list at the end of your response.
+- Focus your response on the actual content the user needs, not on listing what you did.

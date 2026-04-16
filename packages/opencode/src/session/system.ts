@@ -10,6 +10,9 @@ import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_CODEX from "./prompt/codex_header.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
 import type { Provider } from "@/provider/provider"
+import { Antipattern } from "../skill/antipattern"
+import { HardGate } from "../skill/hardgate"
+import { Skill } from "../skill"
 
 export namespace SystemPrompt {
   export function instructions() {
@@ -51,4 +54,37 @@ export namespace SystemPrompt {
       ].join("\n"),
     ]
   }
+
+  export async function harness() {
+    const skills = await Skill.all()
+    if (skills.length === 0) return []
+
+    const parts: string[] = []
+
+    const custom: Antipattern.Entry[] = []
+    const gates: HardGate.Gate[] = []
+    for (const skill of skills) {
+      custom.push(...Antipattern.fromSkill(skill.content))
+      gates.push(...HardGate.parse(skill.content))
+    }
+
+    const merged = Antipattern.merge(custom)
+    if (merged.length > 0) parts.push(Antipattern.format(merged))
+    if (gates.length > 0) parts.push(HardGate.format(gates))
+
+    parts.push(GRANULARITY)
+
+    return [parts.join("\n\n")]
+  }
+
+  const GRANULARITY = `<task-granularity>
+Each implementation task should be 2-5 minutes, with:
+- Exact file paths (create/modify/test)
+- Actual code in code blocks (no placeholders)
+- Exact verification command and expected output
+- Atomic commit message
+
+Failures: "TBD", "TODO", "implement later", "add appropriate handling",
+"similar to Task N", steps without code blocks = PLAN FAILURE.
+</task-granularity>`
 }

@@ -153,7 +153,10 @@ function sanitizeBranch(raw: string): string {
     .replace(/[^a-zA-Z0-9._-]/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
-  return (cleaned || "branch").slice(0, 60)
+  const base = (cleaned || "branch").slice(0, 60)
+  if (base === raw) return base
+  const suffix = createHash("sha256").update(raw).digest("hex").slice(0, 4)
+  return `${base.slice(0, 55)}-${suffix}`
 }
 
 function expandTilde(p: string): string {

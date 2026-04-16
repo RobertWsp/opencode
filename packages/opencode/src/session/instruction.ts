@@ -88,7 +88,6 @@ export namespace InstructionPrompt {
     for (const file of globalFiles()) {
       if (await Filesystem.exists(file)) {
         paths.add(path.resolve(file))
-        break
       }
     }
 

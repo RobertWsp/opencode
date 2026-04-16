@@ -45,6 +45,9 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { CircuitBreaker } from "./circuit-breaker"
+import { Budget } from "./budget"
+import { Intent } from "../agent/intent"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -290,11 +293,18 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    let breaker = CircuitBreaker.create()
     const session = await Session.get(sessionID)
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
       if (abort.aborted) break
+
+      const trip = CircuitBreaker.check(breaker)
+      if (trip === "trip") {
+        log.warn("circuit breaker tripped", { sessionID, calls: breaker.calls, edits: breaker.edits })
+        break
+      }
       let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
 
       let lastUser: MessageV2.User | undefined
@@ -325,6 +335,7 @@ export namespace SessionPrompt {
       }
 
       step++
+      breaker = CircuitBreaker.tick(breaker, "call")
       if (step === 1)
         ensureTitle({
           session,
@@ -627,7 +638,7 @@ export namespace SessionPrompt {
         })
       }
 
-      // Ephemerally wrap queued user messages with a reminder to stay on track
+      // Wrap queued user messages so the model addresses them
       if (step > 1 && lastFinished) {
         for (const msg of msgs) {
           if (msg.info.role !== "user" || msg.info.id <= lastFinished.id) continue
@@ -635,12 +646,13 @@ export namespace SessionPrompt {
             if (part.type !== "text" || part.ignored || part.synthetic) continue
             if (!part.text.trim()) continue
             part.text = [
-              "<system-reminder>",
-              "The user sent the following message:",
+              "<queued-user-message>",
+              "IMPORTANT: The user sent this message while you were working. You MUST read and address it:",
+              "",
               part.text,
               "",
-              "Please address this message and continue with your tasks.",
-              "</system-reminder>",
+              "Address this message before continuing with other tasks.",
+              "</queued-user-message>",
             ].join("\n")
           }
         }
@@ -649,7 +661,14 @@ export namespace SessionPrompt {
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
       // Build system prompt, adding structured output instruction if needed
-      const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+      const system = [...(await SystemPrompt.environment(model)), ...(await SystemPrompt.harness()), ...(await InstructionPrompt.system())]
+      if (step === 1) {
+        const text = msgs.findLast((m) => m.info.role === "user")?.parts
+          .filter((p) => p.type === "text" && !p.synthetic)
+          .map((p) => (p as { text: string }).text)
+          .join(" ") ?? ""
+        if (text) system.push(Intent.hint(Intent.classify(text)))
+      }
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -700,6 +719,8 @@ export namespace SessionPrompt {
           break
         }
       }
+
+      Budget.track(sessionID, agent.name, processor.message.tokens, processor.message.cost)
 
       if (result === "stop") break
       if (result === "compact") {

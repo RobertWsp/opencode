@@ -10,6 +10,28 @@ import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
+import { Tiering } from "../agent/tiering"
+
+const active = new Map<string, number>()
+const failures = new Map<string, number>()
+
+function increment(session: string) {
+  active.set(session, (active.get(session) ?? 0) + 1)
+}
+
+function decrement(session: string) {
+  const n = (active.get(session) ?? 1) - 1
+  if (n <= 0) active.delete(session)
+  active.set(session, n)
+}
+
+function recordFailure(session: string) {
+  failures.set(session, (failures.get(session) ?? 0) + 1)
+}
+
+function clearFailures(session: string) {
+  failures.delete(session)
+}
 
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
@@ -61,6 +83,16 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const agent = await Agent.get(params.subagent_type)
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
 
+      if (agent.maxParallel) {
+        const running = active.get(ctx.sessionID) ?? 0
+        if (running >= agent.maxParallel)
+          throw new Error(`Max parallel tasks reached (${agent.maxParallel}). Wait for running tasks to complete.`)
+      }
+
+      const consecutive = failures.get(ctx.sessionID) ?? 0
+      if (consecutive >= 3)
+        throw new Error(`3 consecutive task failures detected. Review errors before retrying.`)
+
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
 
       const session = await iife(async () => {
@@ -103,10 +135,12 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
-      const model = agent.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = agent.model
+        ?? (agent.tier ? Tiering.resolve(agent.tier, msg.info.providerID) : undefined)
+        ?? {
+          modelID: msg.info.modelID,
+          providerID: msg.info.providerID,
+        }
 
       ctx.metadata({
         title: params.description,
@@ -123,8 +157,22 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       }
       ctx.abort.addEventListener("abort", cancel)
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
+      const deviation = [
+        "",
+        "<deviation_rules>",
+        "While executing, apply these rules automatically:",
+        "- Bugs (broken behavior, errors, incorrect output): Fix inline, no permission needed",
+        "- Missing critical functionality (auth, validation, error handling): Add inline, no permission needed",
+        "- Blocking issues (missing deps, wrong types, broken imports): Fix inline, no permission needed",
+        "- Architectural changes (new DB table, schema change, switching libs): STOP and report back",
+        "",
+        "Priority: Architectural → STOP. All others → fix automatically.",
+        "</deviation_rules>",
+      ].join("\n")
+      const promptParts = await SessionPrompt.resolvePromptParts(params.prompt + deviation)
 
+      increment(ctx.sessionID)
+      using _track = defer(() => decrement(ctx.sessionID))
       const result = await SessionPrompt.prompt({
         messageID,
         sessionID: session.id,
@@ -142,6 +190,8 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         parts: promptParts,
       })
 
+      clearFailures(ctx.sessionID)
+
       const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
 
       const output = [
@@ -150,6 +200,8 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         "<task_result>",
         text,
         "</task_result>",
+        "",
+        "<task_status>COMPLETED — results above are final. Process them now. Do not wait for further notifications.</task_status>",
       ].join("\n")
 
       return {

@@ -696,6 +696,10 @@ export namespace Config {
         .optional()
         .describe("Maximum number of agentic iterations before forcing text-only response"),
       maxSteps: z.number().int().positive().optional().describe("@deprecated Use 'steps' field instead."),
+      tier: z.enum(["quality", "balanced", "budget", "adaptive", "inherit"]).optional().describe("Model tier for cost/quality tradeoff"),
+      freshContext: z.boolean().optional().describe("Start subagent with fresh context (no parent history)"),
+      contextBudget: z.number().int().positive().optional().describe("Max tokens for this agent's context window"),
+      maxParallel: z.number().int().positive().optional().describe("Max concurrent tasks for this agent type"),
       permission: Permission.optional(),
     })
     .catchall(z.any())
@@ -717,6 +721,10 @@ export namespace Config {
         "permission",
         "disable",
         "tools",
+        "tier",
+        "freshContext",
+        "contextBudget",
+        "maxParallel",
       ])
 
       // Extract unknown properties into options

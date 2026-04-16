@@ -91,6 +91,9 @@ async function exchange(code: string, verifier: string) {
 export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hooks> {
   return {
     "experimental.chat.system.transform": async (input, output) => {
+      // Skip identity injection when routing through Meridian proxy —
+      // Sisyphus (oh-my-opencode) provides the agent identity instead.
+      if (process.env.ANTHROPIC_BASE_URL) return
       const prefix = "You are Claude Code, Anthropic's official CLI for Claude."
       if (input.model?.providerID === "anthropic") {
         output.system.unshift(prefix)

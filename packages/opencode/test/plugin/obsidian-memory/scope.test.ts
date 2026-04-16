@@ -87,7 +87,7 @@ describe("detectScope", () => {
   test("sanitizes branch with slashes", async () => {
     const dir = await track(makeRepo({ remote: "git@github.com:foo/bar.git", branch: "feature/new-thing" }))
     const result = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
-    expect(result!.branchSlug).toBe("feature-new-thing")
+    expect(result!.branchSlug).toBe("feature-new-thing-f97b")
   })
 
   test("caps branch slug at 60 chars", async () => {

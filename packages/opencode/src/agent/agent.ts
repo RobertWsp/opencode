@@ -42,6 +42,10 @@ export namespace Agent {
       prompt: z.string().optional(),
       options: z.record(z.string(), z.any()),
       steps: z.number().int().positive().optional(),
+      tier: z.enum(["quality", "balanced", "budget", "adaptive", "inherit"]).optional(),
+      freshContext: z.boolean().optional(),
+      contextBudget: z.number().int().positive().optional(),
+      maxParallel: z.number().int().positive().optional(),
     })
     .meta({
       ref: "Agent",
@@ -114,6 +118,8 @@ export namespace Agent {
       },
       general: {
         name: "general",
+        freshContext: true,
+        tier: "balanced",
         description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
         permission: PermissionNext.merge(
           defaults,
@@ -129,6 +135,8 @@ export namespace Agent {
       },
       explore: {
         name: "explore",
+        freshContext: true,
+        tier: "budget",
         permission: PermissionNext.merge(
           defaults,
           PermissionNext.fromConfig({
@@ -227,6 +235,10 @@ export namespace Agent {
       item.hidden = value.hidden ?? item.hidden
       item.name = value.name ?? item.name
       item.steps = value.steps ?? item.steps
+      item.tier = value.tier ?? item.tier
+      item.freshContext = value.freshContext ?? item.freshContext
+      item.contextBudget = value.contextBudget ?? item.contextBudget
+      item.maxParallel = value.maxParallel ?? item.maxParallel
       item.options = mergeDeep(item.options, value.options ?? {})
       item.permission = PermissionNext.merge(item.permission, PermissionNext.fromConfig(value.permission ?? {}))
     }

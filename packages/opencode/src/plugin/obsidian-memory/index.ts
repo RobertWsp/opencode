@@ -13,11 +13,14 @@ import { expandQueryHyde, hybridRank, rankMemories } from "./retrieval"
 import { createEmbedder, type Embedder } from "./embedder"
 import { createVectorStore, type VectorStore } from "./vector-store"
 import path from "path"
+import os from "os"
+import * as fs from "fs"
 import { detectScope } from "./scope"
 import type { MemoryConfig, MemoryDoc, Scope, VaultDocs } from "./types"
 import { fingerprint, loadAll, writeNote } from "./vault"
 import { buildSummary, formatSummaryNote } from "./session-summary"
 import { runAutoInit, shouldAutoInit } from "./auto-init"
+import * as Profile from "./profile"
 
 const log = Log.create({ service: "plugin.obsidian-memory" })
 
@@ -216,10 +219,14 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   const sessionFiles = new Map<string, Set<string>>()
   const sessionEvents = new Map<string, CaptureEventInput[]>()
   let embedder: Embedder | null = null
+  const vectorStores = new Map<string, VectorStore>()
   let vectorStore: VectorStore | undefined
 
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
+    const cwd = process.cwd()
+    const scope = await detectScope({ worktree: cwd, vaultPath: cfgRef.vaultPath })
+    if (scope) return scope
     return detectScope({ worktree: input.worktree, vaultPath: cfgRef.vaultPath })
   }
 
@@ -313,10 +320,12 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         else if (verb === "suggested") result = await Commands.suggested(scope)
         else if (verb === "approve") result = await Commands.approve(scope, rest)
         else if (verb === "reject") result = await Commands.reject(scope, rest)
+        else if (verb === "search") result = await Commands.search(scope, rest)
+        else if (verb === "health") result = await Commands.health(scope)
         else
           result = {
             ok: false,
-            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject`,
+            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject|search|health`,
           }
       } catch (err) {
         result = { ok: false, text: `[memory] error: ${err instanceof Error ? err.message : String(err)}` }
@@ -334,19 +343,39 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
 
     async "experimental.chat.system.transform"(hookInput, hookOutput) {
       if (!cfgRef?.enabled) return
-      if (hookInput.model?.providerID !== "anthropic") return
+      // Memory injection works for all providers. Cache optimization
+      // (byte-identical blocks for prompt caching) benefits Anthropic most,
+      // but the memory context is valuable for any provider.
+      if (!hookInput.model) return
 
       let scope: Scope | null = null
       try {
         scope = await resolveScope()
       } catch (err) {
         log.error("resolveScope threw", { error: String(err) })
+      }
+
+      if (!scope && cfgRef.vaultPath) {
+        const root = cfgRef.vaultPath.startsWith("~/") ? path.join(os.homedir(), cfgRef.vaultPath.slice(2)) : cfgRef.vaultPath
+        const systemMd = path.join(root, "_system", "MEMORY.md")
+        const parts: string[] = []
+        try {
+          const content = await fs.promises.readFile(systemMd, "utf8")
+          if (content.trim()) parts.push(`<memory scope="system">\n${content.trim()}\n</memory>`)
+        } catch {}
+        try {
+          const profile = await Profile.load(cfgRef.vaultPath)
+          const formatted = Profile.format(profile)
+          if (formatted) parts.push(formatted)
+        } catch {}
+        if (parts.length > 0) {
+          hookOutput.system = (hookOutput.system ?? []).concat(parts.join("\n\n"))
+          log.info("injected system memory + profile (no scope)", { count: parts.length })
+        }
         return
       }
-      if (!scope) {
-        log.debug("scope detection failed — skipping injection")
-        return
-      }
+
+      if (!scope) return
 
       if (cfgRef.autoInit) {
         const needInit = await shouldAutoInit(scope, input.worktree).catch(() => false)
@@ -393,9 +422,11 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         try {
           const docs = await loadAll(scope, cfgRef.maxNotes)
           const activeFiles = hookInput.sessionID ? sessionFiles.get(hookInput.sessionID) : undefined
+          vectorStore = vectorStores.get(scope.repoSlug)
           if (!vectorStore) {
             try {
               vectorStore = createVectorStore(path.join(scope.repoDir, "vectors.db"))
+              if (vectorStore) vectorStores.set(scope.repoSlug, vectorStore)
             } catch (_err) {
               void _err
             }
