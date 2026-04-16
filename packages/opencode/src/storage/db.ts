@@ -13,7 +13,7 @@ import path from "path"
 import { readFileSync, readdirSync, existsSync } from "fs"
 import * as schema from "./schema"
 
-declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number }[] | undefined
+declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
 export const NotFoundError = NamedError.create(
   "NotFoundError",
@@ -31,7 +31,7 @@ export namespace Database {
 
   type Client = SQLiteBunDatabase<Schema>
 
-  type Journal = { sql: string; timestamp: number }[]
+  type Journal = { sql: string; timestamp: number; name: string }[]
 
   const state = {
     sqlite: undefined as BunDatabase | undefined,
@@ -62,6 +62,7 @@ export namespace Database {
         return {
           sql: readFileSync(file, "utf-8"),
           timestamp: time(name),
+          name,
         }
       })
       .filter(Boolean) as Journal
@@ -143,7 +144,8 @@ export namespace Database {
     } catch (err) {
       if (err instanceof Context.NotFound) {
         const effects: (() => void | Promise<void>)[] = []
-        const result = Client().transaction((tx) => {
+        // Drizzle beta.16: sync transaction generic vs Promise — upstream uses same cast
+        const result = (Client().transaction as Function)((tx: TxOrDb) => {
           return ctx.provide({ tx, effects }, () => callback(tx))
         })
         for (const effect of effects) effect()

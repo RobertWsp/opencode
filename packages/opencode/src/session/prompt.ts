@@ -33,6 +33,7 @@ import { spawn } from "child_process"
 import { Command } from "../command"
 import { $, fileURLToPath, pathToFileURL } from "bun"
 import { ConfigMarkdown } from "../config/markdown"
+import { Config } from "../config/config"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/util/error"
 import { fn } from "@/util/fn"
@@ -48,6 +49,7 @@ import { Truncate } from "@/tool/truncation"
 import { CircuitBreaker } from "./circuit-breaker"
 import { Budget } from "./budget"
 import { Intent } from "../agent/intent"
+import { record } from "@/resource/usage"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -451,11 +453,15 @@ export namespace SessionPrompt {
             })
           },
         }
+        const start = Date.now()
         const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
           executionError = error
           log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
           return undefined
         })
+        try {
+          record(Instance.project.id, "task", task.agent, Date.now() - start)
+        } catch {}
         const attachments = result?.attachments?.map((attachment) => ({
           ...attachment,
           id: Identifier.ascending("part"),
@@ -823,7 +829,11 @@ export namespace SessionPrompt {
               args,
             },
           )
+          const start = Date.now()
           const result = await item.execute(args, ctx)
+          try {
+            record(Instance.project.id, "tool", item.id, Date.now() - start)
+          } catch {}
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -848,7 +858,9 @@ export namespace SessionPrompt {
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    const cfg = await Config.get()
+    const mcpTools = cfg.experimental?.lazy_mcp ? await MCP.tools() : await MCP.connectedTools()
+    for (const [key, item] of Object.entries(mcpTools)) {
       const execute = item.execute
       if (!execute) continue
 
@@ -877,7 +889,11 @@ export namespace SessionPrompt {
           always: ["*"],
         })
 
+        const start = Date.now()
         const result = await execute(args, opts)
+        try {
+          record(Instance.project.id, "mcp", key, Date.now() - start)
+        } catch {}
 
         await Plugin.trigger(
           "tool.execute.after",

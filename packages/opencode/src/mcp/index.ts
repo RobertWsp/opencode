@@ -18,6 +18,7 @@ import { Installation } from "../installation"
 import { withTimeout } from "@/util/timeout"
 import { McpOAuthProvider } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
+import { expand, scan } from "../resource/signals"
 import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
@@ -27,6 +28,7 @@ import open from "open"
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
   const DEFAULT_TIMEOUT = 30_000
+  const DEFAULT_IDLE_TIMEOUT = 300_000
 
   export const Resource = z
     .object({
@@ -102,6 +104,20 @@ export namespace MCP {
         .meta({
           ref: "MCPStatusNeedsClientRegistration",
         }),
+      z
+        .object({
+          status: z.literal("pending"),
+        })
+        .meta({
+          ref: "MCPStatusPending",
+        }),
+      z
+        .object({
+          status: z.literal("suspended"),
+        })
+        .meta({
+          ref: "MCPStatusSuspended",
+        }),
     ])
     .meta({
       ref: "MCPStatus",
@@ -112,12 +128,26 @@ export namespace MCP {
   function registerNotificationHandlers(client: MCPClient, serverName: string) {
     client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
       log.info("tools list changed notification received", { server: serverName })
-      Bus.publish(ToolsChanged, { server: serverName })
+      if (activating.size > 0) {
+        log.info("tools changed suppressed during activation", { server: serverName })
+        return
+      }
+      const s = await state()
+      clearTimeout(s.debounce)
+      s.debounce = setTimeout(() => {
+        s.debounce = undefined
+        Bus.publish(ToolsChanged, { server: serverName })
+      }, 500)
     })
   }
 
   // Convert MCP tool definition to AI SDK Tool type
-  async function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Promise<Tool> {
+  async function convertMcpTool(
+    mcpTool: MCPToolDef,
+    client: MCPClient,
+    timeout?: number,
+    onUse?: () => Promise<void>,
+  ): Promise<Tool> {
     const inputSchema = mcpTool.inputSchema
 
     // Spread first, then override type to ensure it's always "object"
@@ -132,6 +162,7 @@ export namespace MCP {
       description: mcpTool.description ?? "",
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
+        await onUse?.()
         return client.callTool(
           {
             name: mcpTool.name,
@@ -150,6 +181,44 @@ export namespace MCP {
   // Store transports for OAuth servers to allow finishing auth
   type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
   const pendingOAuthTransports = new Map<string, TransportWithAuth>()
+  const activating = new Map<string, Promise<{ tools: string[]; error?: string }>>()
+  type Store = {
+    status: Record<string, Status>
+    clients: Record<string, MCPClient>
+    timers: Record<string, ReturnType<typeof setTimeout>>
+    debounce?: ReturnType<typeof setTimeout>
+  }
+
+  function clearTimer(s: Store, name: string) {
+    const timer = s.timers[name]
+    if (!timer) return
+    clearTimeout(timer)
+    delete s.timers[name]
+  }
+
+  async function suspend(name: string) {
+    const s = await state()
+    clearTimer(s, name)
+    const client = s.clients[name]
+    if (!client) return
+    await client.close().catch((error) => {
+      log.error("Failed to close MCP client", { name, error })
+    })
+    delete s.clients[name]
+    s.status[name] = { status: "suspended" }
+  }
+
+  function arm(s: Store, name: string, timeout?: number) {
+    clearTimer(s, name)
+    const ms = timeout ?? DEFAULT_IDLE_TIMEOUT
+    s.timers[name] = setTimeout(() => {
+      void suspend(name)
+    }, ms)
+  }
+
+  async function touch(name: string, timeout?: number) {
+    arm(await state(), name, timeout)
+  }
 
   // Prompt cache types
   type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -182,49 +251,67 @@ export namespace MCP {
     return pids
   }
 
+  async function init(config: NonNullable<Config.Info["mcp"]>, lazy: boolean, timeout?: number) {
+    const clients: Record<string, MCPClient> = {}
+    const status: Record<string, Status> = {}
+    const timers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+    await Promise.all(
+      Object.entries(config).map(async ([key, mcp]) => {
+        if (!isMcpConfigured(mcp)) {
+          log.error("Ignoring MCP config entry without type", { key })
+          return
+        }
+
+        if (mcp.enabled === false) {
+          status[key] = { status: "disabled" }
+          return
+        }
+
+        if (lazy) {
+          status[key] = { status: "pending" }
+          return
+        }
+
+        const result = await create(key, mcp).catch(() => undefined)
+        if (!result) return
+
+        status[key] = result.status
+        if (result.mcpClient) {
+          clients[key] = result.mcpClient
+        }
+      }),
+    )
+
+    return {
+      status,
+      clients,
+      timers,
+      debounce: undefined as ReturnType<typeof setTimeout> | undefined,
+    }
+  }
+
   const state = Instance.state(
     async () => {
       const cfg = await Config.get()
       const config = cfg.mcp ?? {}
-      const clients: Record<string, MCPClient> = {}
-      const status: Record<string, Status> = {}
-
-      await Promise.all(
-        Object.entries(config).map(async ([key, mcp]) => {
-          if (!isMcpConfigured(mcp)) {
-            log.error("Ignoring MCP config entry without type", { key })
-            return
-          }
-
-          // If disabled by config, mark as disabled without trying to connect
-          if (mcp.enabled === false) {
-            status[key] = { status: "disabled" }
-            return
-          }
-
-          const result = await create(key, mcp).catch(() => undefined)
-          if (!result) return
-
-          status[key] = result.status
-
-          if (result.mcpClient) {
-            clients[key] = result.mcpClient
-          }
-        }),
-      )
-      return {
-        status,
-        clients,
-      }
+      const lazy = cfg.experimental?.lazy_mcp ?? false
+      return init(config, lazy, cfg.experimental?.mcp_timeout)
     },
     async (state) => {
+      clearTimeout(state.debounce)
+      state.debounce = undefined
+      for (const name of Object.keys(state.timers)) {
+        clearTimer(state, name)
+      }
+
       // The MCP SDK only signals the direct child process on close.
       // Servers like chrome-devtools-mcp spawn grandchild processes
       // (e.g. Chrome) that the SDK never reaches, leaving them orphaned.
       // Kill the full descendant tree first so the server exits promptly
       // and no processes are left behind.
       for (const client of Object.values(state.clients)) {
-        const pid = (client.transport as any)?.pid
+        const pid = (client.transport as { pid?: number })?.pid
         if (typeof pid !== "number") continue
         for (const dpid of await descendants(pid)) {
           try {
@@ -242,9 +329,19 @@ export namespace MCP {
           }),
         ),
       )
+      activating.clear()
       pendingOAuthTransports.clear()
     },
   )
+
+  const cached = Instance.state(async () => {
+    const result = await scan(Instance.directory).catch(() => ({ signals: [] as string[] }))
+    return result.signals
+  })
+
+  export async function signals(): Promise<string[]> {
+    return cached()
+  }
 
   // Helper function to fetch prompts for a specific client
   async function fetchPromptsForClient(clientName: string, client: Client) {
@@ -293,6 +390,7 @@ export namespace MCP {
 
   export async function add(name: string, mcp: Config.Mcp) {
     const s = await state()
+    const cfg = await Config.get()
     const result = await create(name, mcp)
     if (!result) {
       const status = {
@@ -311,14 +409,15 @@ export namespace MCP {
       }
     }
     // Close existing client if present to prevent memory leaks
-    const existingClient = s.clients[name]
-    if (existingClient) {
-      await existingClient.close().catch((error) => {
+    const prev = s.clients[name]
+    if (prev) {
+      await prev.close().catch((error) => {
         log.error("Failed to close existing MCP client", { name, error })
       })
     }
     s.clients[name] = result.mcpClient
     s.status[name] = result.status
+    if (cfg.experimental?.lazy_mcp) arm(s, name, cfg.experimental?.mcp_timeout)
 
     return {
       status: s.status,
@@ -380,14 +479,14 @@ export namespace MCP {
       ]
 
       let lastError: Error | undefined
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const timeout = mcp.timeout ?? DEFAULT_TIMEOUT
       for (const { name, transport } of transports) {
         try {
           const client = new Client({
             name: "opencode",
             version: Installation.VERSION,
           })
-          await withTimeout(client.connect(transport), connectTimeout)
+          await withTimeout(client.connect(transport), timeout)
           registerNotificationHandlers(client, key)
           mcpClient = client
           log.info("connected", { key, transport: name })
@@ -465,13 +564,13 @@ export namespace MCP {
         log.info(`mcp stderr: ${chunk.toString()}`, { key })
       })
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const timeout = mcp.timeout ?? DEFAULT_TIMEOUT
       try {
         const client = new Client({
           name: "opencode",
           version: Installation.VERSION,
         })
-        await withTimeout(client.connect(transport), connectTimeout)
+        await withTimeout(client.connect(transport), timeout)
         registerNotificationHandlers(client, key)
         mcpClient = client
         status = {
@@ -583,18 +682,20 @@ export namespace MCP {
     s.status[name] = result.status
     if (result.mcpClient) {
       // Close existing client if present to prevent memory leaks
-      const existingClient = s.clients[name]
-      if (existingClient) {
-        await existingClient.close().catch((error) => {
+      const prev = s.clients[name]
+      if (prev) {
+        await prev.close().catch((error) => {
           log.error("Failed to close existing MCP client", { name, error })
         })
       }
       s.clients[name] = result.mcpClient
+      if (cfg.experimental?.lazy_mcp) arm(s, name, cfg.experimental?.mcp_timeout)
     }
   }
 
   export async function disconnect(name: string) {
     const s = await state()
+    clearTimer(s, name)
     const client = s.clients[name]
     if (client) {
       await client.close().catch((error) => {
@@ -605,7 +706,132 @@ export namespace MCP {
     s.status[name] = { status: "disabled" }
   }
 
-  export async function tools() {
+  export type GatewayTool = {
+    id: string
+    description: string
+    execute: () => Promise<{ tools: string[]; error?: string }>
+  }
+
+  function toGatewayTool(item: GatewayTool): Tool {
+    return dynamicTool({
+      description: item.description,
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      }),
+      execute: async () => {
+        const result = await item.execute()
+        const text = result.error
+          ? result.error
+          : result.tools.length
+            ? `Activated MCP server. Available tools: ${result.tools.join(", ")}`
+            : "Activated MCP server. No tools available."
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+          metadata: {
+            tools: result.tools,
+          },
+        }
+      },
+    })
+  }
+
+  export async function gatewayTools(signals?: string[]): Promise<GatewayTool[]> {
+    const s = await state()
+    const cfg = await Config.get()
+    const config = cfg.mcp ?? {}
+    const result: GatewayTool[] = []
+    const searchCtx = new Map<string, string>()
+
+    for (const [name, entry] of Object.entries(config)) {
+      if (!isMcpConfigured(entry)) continue
+      if (entry.enabled === false) continue
+      const info = s.status[name]
+      if (info?.status === "connected") continue
+      if (info?.status === "failed") continue
+      if (info?.status === "needs_auth") continue
+      if (info?.status === "needs_client_registration") continue
+      const mcp = entry
+      const id = "mcp_activate_" + name.replace(/[^a-zA-Z0-9_-]/g, "_")
+      const ctx = [name, ...(entry.type === "local" ? (entry.command ?? []) : [entry.url ?? ""])]
+        .join(" ")
+        .toLowerCase()
+      searchCtx.set(id, ctx)
+
+      result.push({
+        id,
+        description: `Activate the '${name}' MCP server to access its tools`,
+        execute: async () => {
+          const now = await state()
+          if (now.status[name]?.status === "connected") {
+            const client = now.clients[name]
+            if (!client) return { tools: [] }
+            const listed = await client.listTools().catch(() => ({ tools: [] }))
+            return { tools: listed.tools.map((tool) => tool.name) }
+          }
+
+          let pending = activating.get(name)
+          if (!pending) {
+            pending = (async () => {
+              const created = await create(name, mcp)
+              const cfg = await Config.get()
+              const latest = await state()
+              latest.status[name] = created.status
+              if (!created.mcpClient) {
+                if (created.status.status === "needs_auth")
+                  return {
+                    tools: [],
+                    error: `[AUTH REQUIRED] MCP '${name}' requires authentication. Run: opencode mcp auth ${name}`,
+                  }
+                if (created.status.status === "needs_client_registration")
+                  return {
+                    tools: [],
+                    error: `[AUTH REQUIRED] MCP '${name}' requires a pre-registered client ID. Add clientId to your MCP config.`,
+                  }
+                return { tools: [] }
+              }
+              const prev = latest.clients[name]
+              if (prev && prev !== created.mcpClient) {
+                await prev.close().catch((error) => {
+                  log.error("Failed to close existing MCP client", { name, error })
+                })
+              }
+              latest.clients[name] = created.mcpClient
+              arm(latest, name, cfg.experimental?.mcp_timeout)
+              const listed = await created.mcpClient.listTools().catch(() => ({ tools: [] }))
+              return { tools: listed.tools.map((tool) => tool.name) }
+            })().finally(() => {
+              activating.delete(name)
+            })
+            activating.set(name, pending)
+          }
+
+          return pending
+        },
+      })
+    }
+
+    if (signals?.length) {
+      const keywords = expand(signals)
+      result.sort((a, b) => {
+        const al = searchCtx.get(a.id) ?? a.id
+        const bl = searchCtx.get(b.id) ?? b.id
+        const am = keywords.some((k) => al.includes(k)) ? 1 : 0
+        const bm = keywords.some((k) => bl.includes(k)) ? 1 : 0
+        return bm - am
+      })
+    }
+
+    return result
+  }
+
+  export async function connectedTools() {
     const result: Record<string, Tool> = {}
     const s = await state()
     const cfg = await Config.get()
@@ -626,6 +852,7 @@ export namespace MCP {
             error: e instanceof Error ? e.message : String(e),
           }
           s.status[clientName] = failedStatus
+          clearTimer(s, clientName)
           delete s.clients[clientName]
           return undefined
         })
@@ -641,8 +868,23 @@ export namespace MCP {
       for (const mcpTool of toolsResult.tools) {
         const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
+        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout, () =>
+          touch(clientName, defaultTimeout),
+        )
       }
+    }
+    return result
+  }
+
+  export async function tools() {
+    const result = await connectedTools()
+    const sigs = await signals()
+    for (const item of await gatewayTools(sigs)) {
+      if (result[item.id]) {
+        log.warn("Skipping duplicate MCP tool id", { id: item.id })
+        continue
+      }
+      result[item.id] = toGatewayTool(item)
     }
     return result
   }

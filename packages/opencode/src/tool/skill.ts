@@ -6,6 +6,9 @@ import { Skill } from "../skill"
 import { PermissionNext } from "../permission/next"
 import { Ripgrep } from "../file/ripgrep"
 import { iife } from "@/util/iife"
+import { rank } from "./skill-rank"
+import { MCP } from "../mcp"
+import { expand } from "../resource/signals"
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const skills = await Skill.all()
@@ -18,6 +21,11 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         return rule.action !== "deny"
       })
     : skills
+
+  const sigs = expand(await MCP.signals().catch(() => [] as string[]))
+  const ranked = rank(accessibleSkills, sigs, undefined)
+  const top = ranked.slice(0, 10).map((s) => s.skill)
+  const more = accessibleSkills.length > 10
 
   const description =
     accessibleSkills.length === 0
@@ -35,7 +43,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
           "<available_skills>",
-          ...accessibleSkills.flatMap((skill) => [
+          ...top.flatMap((skill) => [
             `  <skill>`,
             `    <name>${skill.name}</name>`,
             `    <description>${skill.description}</description>`,
@@ -43,6 +51,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
             `  </skill>`,
           ]),
           "</available_skills>",
+          ...(more ? ["", "More skills available — use skill_search to find them"] : []),
         ].join("\n")
 
   const examples = accessibleSkills
