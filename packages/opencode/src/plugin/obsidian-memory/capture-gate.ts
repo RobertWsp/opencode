@@ -121,14 +121,29 @@ export class CaptureGate {
    */
   async enqueue(ev: CaptureEventInput): Promise<void> {
     if (!this.enabled) return
-    if (this.isPaused()) return
-    if (isTrivial(ev)) return
+    if (this.isPaused()) {
+      log.debug("enqueue skipped: circuit breaker paused", { sessionID: ev.sessionID })
+      return
+    }
+    if (isTrivial(ev)) {
+      log.debug("enqueue skipped: trivial event", {
+        sessionID: ev.sessionID,
+        tool: ev.details?.["tool"],
+      })
+      return
+    }
 
     ev.summary = stripPrivate(ev.summary)
     ev.details = sanitizeRecord(ev.details)
 
     const q = this.getQueue(ev.sessionID)
-    if (isFilterable(ev, q)) return
+    if (isFilterable(ev, q)) {
+      log.debug("enqueue skipped: filtered (dedup or file cap)", {
+        sessionID: ev.sessionID,
+        tool: ev.details?.["tool"],
+      })
+      return
+    }
     q.events.push(ev)
 
     if (q.events.length >= IMMEDIATE_FLUSH_THRESHOLD || q.events.length >= BATCH_MAX_EVENTS) {
@@ -540,17 +555,26 @@ function isTrivial(ev: CaptureEventInput): boolean {
   return false
 }
 
+// READ_ONLY_TOOLS is intentionally small here — the broader `isTrivial`
+// filter already handles low-signal read tools upstream. This list is
+// reserved for duplicate-class rejection only when a READ_ONLY tool is
+// fired many times over the same file (see FILE_READ_MAX below).
 const READ_ONLY_TOOLS = new Set([
-  "Read",
-  "grep",
-  "glob",
   "lsp_diagnostics",
   "lsp_symbols",
   "lsp_goto_definition",
   "lsp_find_references",
 ])
-const DEDUP_WINDOW_MS = 30 * 60 * 1000
-const FILE_READ_MAX = 3
+// Deduplication window: drops repeated events with identical summary hash
+// within this TTL. 5 minutes is enough to absorb rapid retries (same tool
+// signature within a single reasoning loop) without losing distinct
+// captures across a typical coding turn (~30s-2min).
+const DEDUP_WINDOW_MS = 5 * 60 * 1000
+// Max distinct events per file before additional hits are filtered.
+// Raised from 3 → 10 because agent tasks commonly edit the same file
+// many times within a single feature (small iterative edits, test fix,
+// refactor passes). Below 10 we were losing 60-80% of capture signal.
+const FILE_READ_MAX = 10
 
 function normalizeHash(text: string): string {
   const s = text.toLowerCase().trim().replace(/\s+/g, " ")
@@ -563,14 +587,30 @@ function normalizeHash(text: string): string {
 
 function isFilterable(ev: CaptureEventInput, q: QueueState): boolean {
   const tool = (ev.details?.["tool"] as string | undefined) ?? ""
-  if (READ_ONLY_TOOLS.has(tool)) return true
 
-  const hash = normalizeHash(ev.summary)
+  // LSP diagnostic-class tools dedupe aggressively — they fire rapidly
+  // during navigation and produce low-signal results.
+  if (READ_ONLY_TOOLS.has(tool)) {
+    const hash = normalizeHash(`${tool}:${ev.summary}`)
+    if (!q.recentHashes) q.recentHashes = new Map()
+    const last = q.recentHashes.get(hash)
+    if (last !== undefined && Date.now() - last < DEDUP_WINDOW_MS) return true
+    q.recentHashes.set(hash, Date.now())
+    return false
+  }
+
+  // For all other tools, only dedupe when both tool AND summary match
+  // within the window (not just summary alone). Different tools on the
+  // same target should NOT be deduped against each other.
+  const hash = normalizeHash(`${tool}:${ev.summary}`)
   if (!q.recentHashes) q.recentHashes = new Map()
   const last = q.recentHashes.get(hash)
   if (last !== undefined && Date.now() - last < DEDUP_WINDOW_MS) return true
   q.recentHashes.set(hash, Date.now())
 
+  // Per-file overflow cap. Only applies to tools whose details include a
+  // `files` array (read-like tools); edits on the same file are tracked
+  // but each edit has a distinct summary/hash so dedupe handles it.
   const file = (ev.details?.["files"] as string[] | undefined)?.[0]
   if (file) {
     if (!q.fileReadCount) q.fileReadCount = new Map()

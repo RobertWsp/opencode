@@ -418,74 +418,89 @@ describe("wikilink validation — links must reference existing vault notes only
 })
 
 describe("isFilterable — heuristic pre-filters", () => {
-  test("Read tool → filtered", () => {
+  test("Read tool → NOT filtered by isFilterable (handled by isTrivial upstream)", () => {
     const q = makeQueue()
+    // Read/grep/glob/websearch/webfetch/codesearch are dropped by isTrivial.
+    // isFilterable only sees non-trivial events, so passing Read here should
+    // be treated like any other tool: subject to dedup/file-cap rules.
     expect(
       __internal.isFilterable(
         { kind: "tool.after", sessionID: "s", summary: "read src/auth.ts", details: { tool: "Read" }, timestamp: 0 },
         q,
       ),
-    ).toBe(true)
+    ).toBe(false)
   })
 
-  test("grep tool → filtered", () => {
+  test("grep tool → NOT filtered by isFilterable (upstream handles)", () => {
     const q = makeQueue()
     expect(
       __internal.isFilterable(
         { kind: "tool.after", sessionID: "s", summary: "grep pattern", details: { tool: "grep" }, timestamp: 0 },
         q,
       ),
-    ).toBe(true)
+    ).toBe(false)
   })
 
-  test("glob tool → filtered", () => {
+  test("glob tool → NOT filtered by isFilterable (upstream handles)", () => {
     const q = makeQueue()
     expect(
       __internal.isFilterable(
         { kind: "tool.after", sessionID: "s", summary: "glob *.ts", details: { tool: "glob" }, timestamp: 0 },
         q,
       ),
-    ).toBe(true)
+    ).toBe(false)
   })
 
-  test("lsp_diagnostics → filtered", () => {
+  test("lsp_diagnostics → first call passes, repeat within window filtered", () => {
     const q = makeQueue()
-    expect(
-      __internal.isFilterable(
-        { kind: "tool.after", sessionID: "s", summary: "ran diagnostics", details: { tool: "lsp_diagnostics" }, timestamp: 0 },
-        q,
-      ),
-    ).toBe(true)
+    const ev = {
+      kind: "tool.after" as const,
+      sessionID: "s",
+      summary: "ran diagnostics",
+      details: { tool: "lsp_diagnostics" },
+      timestamp: 0,
+    }
+    expect(__internal.isFilterable(ev, q)).toBe(false)
+    expect(__internal.isFilterable(ev, q)).toBe(true)
   })
 
-  test("lsp_symbols → filtered", () => {
+  test("lsp_symbols → first call passes, repeat within window filtered", () => {
     const q = makeQueue()
-    expect(
-      __internal.isFilterable(
-        { kind: "tool.after", sessionID: "s", summary: "lsp symbols", details: { tool: "lsp_symbols" }, timestamp: 0 },
-        q,
-      ),
-    ).toBe(true)
+    const ev = {
+      kind: "tool.after" as const,
+      sessionID: "s",
+      summary: "lsp symbols",
+      details: { tool: "lsp_symbols" },
+      timestamp: 0,
+    }
+    expect(__internal.isFilterable(ev, q)).toBe(false)
+    expect(__internal.isFilterable(ev, q)).toBe(true)
   })
 
-  test("lsp_goto_definition → filtered", () => {
+  test("lsp_goto_definition → first call passes, repeat within window filtered", () => {
     const q = makeQueue()
-    expect(
-      __internal.isFilterable(
-        { kind: "tool.after", sessionID: "s", summary: "goto def", details: { tool: "lsp_goto_definition" }, timestamp: 0 },
-        q,
-      ),
-    ).toBe(true)
+    const ev = {
+      kind: "tool.after" as const,
+      sessionID: "s",
+      summary: "goto def",
+      details: { tool: "lsp_goto_definition" },
+      timestamp: 0,
+    }
+    expect(__internal.isFilterable(ev, q)).toBe(false)
+    expect(__internal.isFilterable(ev, q)).toBe(true)
   })
 
-  test("lsp_find_references → filtered", () => {
+  test("lsp_find_references → first call passes, repeat within window filtered", () => {
     const q = makeQueue()
-    expect(
-      __internal.isFilterable(
-        { kind: "tool.after", sessionID: "s", summary: "find refs", details: { tool: "lsp_find_references" }, timestamp: 0 },
-        q,
-      ),
-    ).toBe(true)
+    const ev = {
+      kind: "tool.after" as const,
+      sessionID: "s",
+      summary: "find refs",
+      details: { tool: "lsp_find_references" },
+      timestamp: 0,
+    }
+    expect(__internal.isFilterable(ev, q)).toBe(false)
+    expect(__internal.isFilterable(ev, q)).toBe(true)
   })
 
   test("write tool → NOT filtered", () => {
@@ -518,7 +533,7 @@ describe("isFilterable — heuristic pre-filters", () => {
     ).toBe(false)
   })
 
-  test("same summary within 30min → second call filtered (dedup)", () => {
+  test("same summary within 5min → second call filtered (dedup)", () => {
     const q = makeQueue()
     const ev: CaptureEventInput = {
       kind: "tool.after",
@@ -531,10 +546,10 @@ describe("isFilterable — heuristic pre-filters", () => {
     expect(__internal.isFilterable(ev, q)).toBe(true)
   })
 
-  test("same summary after 30+ min window → NOT filtered (expired)", () => {
+  test("same summary after 5+ min window → NOT filtered (expired)", () => {
     const q = makeQueue()
-    const hash = __internal.normalizeHash("some repeated analysis content")
-    q.recentHashes = new Map([[hash, Date.now() - 31 * 60 * 1000]])
+    const hash = __internal.normalizeHash("edit:some repeated analysis content")
+    q.recentHashes = new Map([[hash, Date.now() - 6 * 60 * 1000]])
     expect(
       __internal.isFilterable(
         { kind: "tool.after", sessionID: "s", summary: "some repeated analysis content", details: { tool: "edit" }, timestamp: Date.now() },
@@ -543,7 +558,7 @@ describe("isFilterable — heuristic pre-filters", () => {
     ).toBe(false)
   })
 
-  test("same file referenced 3+ times → 4th call filtered", () => {
+  test("same file referenced 10+ times → 11th call filtered", () => {
     const q = makeQueue()
     const ev = (n: number): CaptureEventInput => ({
       kind: "tool.after",
@@ -552,10 +567,10 @@ describe("isFilterable — heuristic pre-filters", () => {
       details: { tool: "edit", files: ["src/auth.ts"] },
       timestamp: Date.now(),
     })
-    expect(__internal.isFilterable(ev(1), q)).toBe(false)
-    expect(__internal.isFilterable(ev(2), q)).toBe(false)
-    expect(__internal.isFilterable(ev(3), q)).toBe(false)
-    expect(__internal.isFilterable(ev(4), q)).toBe(true)
+    for (let i = 1; i <= 10; i++) {
+      expect(__internal.isFilterable(ev(i), q)).toBe(false)
+    }
+    expect(__internal.isFilterable(ev(11), q)).toBe(true)
   })
 
   test("different files have independent counters", () => {
@@ -567,10 +582,10 @@ describe("isFilterable — heuristic pre-filters", () => {
       details: { tool: "edit", files: [file] },
       timestamp: Date.now(),
     })
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 10; i++) {
       expect(__internal.isFilterable(ev("src/a.ts", i), q)).toBe(false)
     }
     expect(__internal.isFilterable(ev("src/b.ts", 1), q)).toBe(false)
-    expect(__internal.isFilterable(ev("src/a.ts", 4), q)).toBe(true)
+    expect(__internal.isFilterable(ev("src/a.ts", 11), q)).toBe(true)
   })
 })
