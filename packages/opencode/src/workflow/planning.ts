@@ -50,10 +50,13 @@ export namespace Planning {
     return Array.from(matches).map((m) => Decision.parse(JSON.parse(m[1])))
   }
 
-  export async function addDecision(root: string, decision: Omit<Decision, "id">): Promise<Decision> {
+  export async function addDecision(
+    root: string,
+    decision: Omit<z.input<typeof Decision>, "id">,
+  ): Promise<Decision> {
     const existing = await decisions(root)
     const id = `D-${String(existing.length + 1).padStart(2, "0")}`
-    const next: Decision = { id, title: decision.title, rationale: decision.rationale, locked: decision.locked }
+    const next: Decision = Decision.parse({ id, ...decision })
     const file = Bun.file(path.join(root, DIR, "CONTEXT.md"))
     const prev = (await file.exists()) ? await file.text() : "# Context\n"
     await Bun.write(path.join(root, DIR, "CONTEXT.md"), prev + `\n<!-- DECISION ${JSON.stringify(next)} -->\n`)

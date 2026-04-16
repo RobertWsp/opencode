@@ -21,7 +21,7 @@ beforeEach(() => {
   calls = []
   ok = true
   body = makePayload(1024, 1)
-  global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fakeFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({
       url: input.toString(),
       body: init?.body ? JSON.parse(init.body as string) : null,
@@ -33,6 +33,7 @@ beforeEach(() => {
       json: async () => body,
     } as Response
   }
+  global.fetch = Object.assign(fakeFetch, { preconnect: () => {} }) as typeof fetch
 })
 
 afterEach(() => {
@@ -118,9 +119,12 @@ describe("Embedder.embed", () => {
   })
 
   test("returns null array on network error", async () => {
-    global.fetch = async () => {
-      throw new Error("network error")
-    }
+    global.fetch = Object.assign(
+      async () => {
+        throw new Error("network error")
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch
     const embedder = createEmbedder({ apiKey: "key" })!
     const results = await embedder.embed(["text"])
 

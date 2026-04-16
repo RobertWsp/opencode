@@ -53,15 +53,15 @@ async function makeContext(opts?: {
 }
 
 async function loadPlugin(ctx: TestContext, memoryConfig: Record<string, unknown> | false) {
-  // @ts-expect-error — passing a stub PluginInput with only the fields we need
-  const hooks = await ObsidianMemoryPlugin({
+  const stubInput = {
     client: ctx.client,
     project: { id: "test" },
     worktree: ctx.worktree,
     directory: ctx.worktree,
     serverUrl: "http://localhost:4096",
     $,
-  })
+  } as unknown as Parameters<typeof ObsidianMemoryPlugin>[0]
+  const hooks = await ObsidianMemoryPlugin(stubInput)
   const cfg: { memory?: unknown; command?: Record<string, unknown> } = {}
   if (memoryConfig !== false) cfg.memory = memoryConfig
   await hooks.config?.(cfg as never)

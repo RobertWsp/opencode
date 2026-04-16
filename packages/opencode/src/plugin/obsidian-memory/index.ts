@@ -311,9 +311,19 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       const verb = (space >= 0 ? raw.slice(0, space) : raw).toLowerCase() || "list"
       const rest = space >= 0 ? raw.slice(space + 1).trim() : ""
 
+      const saveClient = {
+        session: {
+          messages: (args: { sessionID: string; limit?: number }) =>
+            input.client.session.messages({
+              path: { id: args.sessionID },
+              query: args.limit !== undefined ? { limit: args.limit } : undefined,
+            }),
+        },
+      }
+
       let result: { ok: boolean; text: string }
       try {
-        if (verb === "save") result = await Commands.save(scope, rest, hookInput.sessionID, input.client)
+        if (verb === "save") result = await Commands.save(scope, rest, hookInput.sessionID, saveClient)
         else if (verb === "list") result = await Commands.list(scope)
         else if (verb === "show") result = await Commands.show(scope, rest)
         else if (verb === "stats") result = await Commands.stats(scope)

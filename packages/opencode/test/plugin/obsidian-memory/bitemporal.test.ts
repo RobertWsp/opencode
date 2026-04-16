@@ -144,6 +144,7 @@ describe("injector filters invalidated memories", () => {
     branchDir: "/vault/opencode/repos/test-abc/branches/main",
     branchSharedPath: "/vault/opencode/repos/test-abc/branches/main/MEMORY.md",
     notesDir: "/vault/opencode/repos/test-abc/branches/main/notes",
+    suggestedDir: "/vault/opencode/repos/test-abc/branches/main/suggested",
     systemDir: "/vault/_system",
     systemSharedPath: "/vault/_system/MEMORY.md",
   }

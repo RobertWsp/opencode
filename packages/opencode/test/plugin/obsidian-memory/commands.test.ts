@@ -16,6 +16,7 @@ async function makeScope(): Promise<Scope> {
   const branchDir = path.join(repoDir, "branches", branchSlug)
   const notesDir = path.join(branchDir, "notes")
   await fs.mkdir(notesDir, { recursive: true })
+  const systemDir = path.join(vaultRoot, "_system")
   return {
     vaultRoot,
     basename: "test",
@@ -28,6 +29,9 @@ async function makeScope(): Promise<Scope> {
     branchDir,
     branchSharedPath: path.join(branchDir, "MEMORY.md"),
     notesDir,
+    suggestedDir: path.join(branchDir, "suggested"),
+    systemDir,
+    systemSharedPath: path.join(systemDir, "MEMORY.md"),
   }
 }
 

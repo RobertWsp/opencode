@@ -15,6 +15,7 @@ function makeScope(overrides: Partial<Scope> = {}): Scope {
     branchDir: "/tmp/vault/opencode/repos/test-abc123/branches/main",
     branchSharedPath: "/tmp/vault/opencode/repos/test-abc123/branches/main/MEMORY.md",
     notesDir: "/tmp/vault/opencode/repos/test-abc123/branches/main/notes",
+    suggestedDir: "/tmp/vault/opencode/repos/test-abc123/branches/main/suggested",
     systemDir: "/tmp/vault/_system",
     systemSharedPath: "/tmp/vault/_system/MEMORY.md",
     ...overrides,
