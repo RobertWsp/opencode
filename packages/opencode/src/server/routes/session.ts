@@ -795,7 +795,13 @@ export const SessionRoutes = lazy(() =>
         return stream(c, async () => {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
-          SessionPrompt.prompt({ ...body, sessionID })
+          SessionPrompt.prompt({ ...body, sessionID }).catch((error) => {
+            log.error("prompt_async rejected", {
+              sessionID,
+              agent: body.agent,
+              error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error),
+            })
+          })
         })
       },
     )
