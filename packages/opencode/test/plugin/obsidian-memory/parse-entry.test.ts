@@ -6,7 +6,10 @@ import {
   titleToSlug,
   toEntry,
 } from "../../../src/plugin/obsidian-memory/parse-entry"
-import type { MemoryDoc } from "../../../src/plugin/obsidian-memory/types"
+import {
+  coerceConfidence,
+  type MemoryDoc,
+} from "../../../src/plugin/obsidian-memory/types"
 
 function makeDoc(overrides: Partial<MemoryDoc> & { body?: string; meta?: Record<string, string> }): MemoryDoc {
   return {
@@ -204,5 +207,69 @@ describe("titleToSlug", () => {
   test("falls back to 'note' on empty", () => {
     expect(titleToSlug("")).toBe("note")
     expect(titleToSlug("!!!")).toBe("note")
+  })
+})
+
+describe("coerceConfidence", () => {
+  test("passes through valid tiers", () => {
+    expect(coerceConfidence("extracted")).toBe("extracted")
+    expect(coerceConfidence("inferred")).toBe("inferred")
+    expect(coerceConfidence("ambiguous")).toBe("ambiguous")
+  })
+
+  test("returns undefined on unknown/non-string (no throw)", () => {
+    expect(coerceConfidence("unknown")).toBeUndefined()
+    expect(coerceConfidence("")).toBeUndefined()
+    expect(coerceConfidence(undefined)).toBeUndefined()
+    expect(coerceConfidence(null)).toBeUndefined()
+    expect(coerceConfidence(123)).toBeUndefined()
+    expect(coerceConfidence({})).toBeUndefined()
+  })
+})
+
+describe("toEntry confidence", () => {
+  test("legacy note without confidence => fields undefined, no throw", () => {
+    const entry = toEntry(
+      makeDoc({
+        path: "/vault/opencode/repos/test-abc/notes/legacy.md",
+        meta: { title: "Legacy" },
+        body: "body",
+      }),
+    )
+    expect(entry.confidence).toBeUndefined()
+    expect(entry.confidence_score).toBeUndefined()
+  })
+
+  test("new note with confidence + confidence_score parsed", () => {
+    const entry = toEntry(
+      makeDoc({
+        meta: {
+          title: "new",
+          confidence: "inferred",
+          confidence_score: "0.7",
+        },
+      }),
+    )
+    expect(entry.confidence).toBe("inferred")
+    expect(entry.confidence_score).toBe(0.7)
+  })
+
+  test("invalid confidence string drops to undefined", () => {
+    const entry = toEntry(makeDoc({ meta: { confidence: "garbage" } }))
+    expect(entry.confidence).toBeUndefined()
+  })
+
+  test("non-numeric confidence_score drops to undefined", () => {
+    const entry = toEntry(makeDoc({ meta: { confidence_score: "NaN" } }))
+    expect(entry.confidence_score).toBeUndefined()
+  })
+
+  test("confidence_score clamped to [0, 1]", () => {
+    expect(
+      toEntry(makeDoc({ meta: { confidence_score: "1.5" } })).confidence_score,
+    ).toBe(1)
+    expect(
+      toEntry(makeDoc({ meta: { confidence_score: "-0.3" } })).confidence_score,
+    ).toBe(0)
   })
 })
