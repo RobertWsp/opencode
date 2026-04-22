@@ -41,7 +41,7 @@ describe("getParser", () => {
   test("ts parser can parse valid TypeScript", async () => {
     const parser = await getParser("ts")
     expect(parser).not.toBeNull()
-    const tree = parser!.parse("const x: number = 42")
+    const tree = parser!.parse("const x: number = 42")!
     expect(tree).not.toBeNull()
     expect(tree.rootNode.type).toBe("program")
     expect(tree.rootNode.hasError).toBe(false)
