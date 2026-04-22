@@ -5,7 +5,7 @@ import { callHaiku } from "./haiku-client"
 import { isValidAt } from "./parse-entry"
 import { filterActive } from "./forgetting"
 import type { Confidence, MemoryEntry, Scope } from "./types"
-import { VaultIndex, type FtsHit } from "./vault-index"
+import { VaultIndex, getVaultIndex, type FtsHit } from "./vault-index"
 import type { VectorStore } from "./vector-store"
 import type { Embedder } from "./embedder"
 
@@ -156,14 +156,13 @@ async function computeRelevance(
 
   if (useFts) {
     try {
-      const index = new VaultIndex(scope.vaultRoot)
+      const index = getVaultIndex(scope.vaultRoot)
       // Lazy rebuild if index is empty OR if filesystem has more files
       // than indexed (external edits, new auto-captures not yet upserted).
       if (entries.length > 0 && (index.count() === 0 || (await index.isStale(scope)))) {
         await index.rebuild(scope)
       }
       const hits = index.search(query, Math.max(entries.length, 50))
-      index.close()
       if (hits.length > 0) {
         const maxAbs = Math.max(1, ...hits.map((h) => Math.abs(h.score)))
         for (const hit of hits) {
@@ -312,7 +311,7 @@ export async function hybridRank(
   const useFts = opts.useFts5 !== false
 
   const order: Record<string, number> = { extracted: 2, inferred: 1, ambiguous: 0 }
-  let entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  let entries = filterActive((await loadAllEntries(scope)).filter((e) => isValidAt(e)))
   if (opts.minConfidence) {
     const min = order[opts.minConfidence] ?? 0
     entries = entries.filter((e) => (order[e.confidence ?? ""] ?? -1) >= min)
@@ -337,42 +336,93 @@ export async function hybridRank(
   const now = Date.now()
   for (const entry of entries) {
     const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
-    bm25RankMap.set(entry.doc.path, bm25Map.get(entry.doc.path) ?? 0)
-    vectorRankMap.set(entry.doc.path, vectorMap.get(entry.doc.path) ?? 0)
+    const b = bm25Map.get(entry.doc.path) ?? 0
+    if (b > 0) bm25RankMap.set(entry.doc.path, b)
+    const v = vectorMap.get(entry.doc.path) ?? 0
+    if (v > 0) vectorRankMap.set(entry.doc.path, v)
     recencyRankMap.set(entry.doc.path, Math.exp(-ageDays / half))
     pagerankRankMap.set(entry.doc.path, opts.pagerankScores?.get(entry.doc.path) ?? 0)
   }
 
   const rrfScores = rrfMerge([bm25RankMap, vectorRankMap, recencyRankMap, pagerankRankMap])
 
+  // Relevance RRF (bm25 + vector only) → linearly rank-normalised to [0,1]
+  // with tie-awareness. With k=60, raw differences between rank 1 and rank 2
+  // are ~0.0002, so using raw scores directly would let importance override a
+  // clear text-match winner. Linear normalization maps the best match to 1.0
+  // and the worst to 0.0, giving the relevance signal its intended 55% weight.
+  const relevanceRRF = rrfMerge([bm25RankMap, vectorRankMap])
+  const relSorted = [...entries].sort(
+    (a, b) => (relevanceRRF.get(b.doc.path) ?? 0) - (relevanceRRF.get(a.doc.path) ?? 0),
+  )
+  const relevanceScore = new Map<string, number>()
+  const nEntries = relSorted.length
+  let ri = 0
+  while (ri < nEntries) {
+    let rj = ri
+    const baseVal = relevanceRRF.get(relSorted[ri].doc.path) ?? 0
+    while (rj < nEntries - 1 && Math.abs(baseVal - (relevanceRRF.get(relSorted[rj + 1].doc.path) ?? 0)) < 1e-12)
+      rj++
+    const midRank = (ri + rj) / 2
+    const normVal = nEntries > 1 ? (nEntries - 1 - midRank) / (nEntries - 1) : 1
+    for (let rk = ri; rk <= rj; rk++) relevanceScore.set(relSorted[rk].doc.path, normVal)
+    ri = rj + 1
+  }
+
   const ranked: RankedEntry[] = entries.map((entry) => {
+    const path = entry.doc.path
     const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
     const recency = Math.exp(-ageDays / half)
-    const bm25 = bm25Map.get(entry.doc.path) ?? 0
-    const vector = vectorMap.get(entry.doc.path) ?? 0
-    const pagerank = opts.pagerankScores?.get(entry.doc.path) ?? 0
+    const bm25 = bm25Map.get(path) ?? 0
+    const vector = vectorMap.get(path) ?? 0
+    const pagerank = opts.pagerankScores?.get(path) ?? 0
     const boost = fileBoost(entry, opts.activeFiles)
-    const rrfScore = (rrfScores.get(entry.doc.path) ?? 0) + boost * 0.05
-    const score = rrfScore * (1 + entry.importance * 0.3) * confidenceBoost(entry)
+    const rel = relevanceScore.get(path) ?? 0
+    const score =
+      (rel * 0.55 + recency * 0.15 + entry.importance * 0.05 + pagerank * 0.10 + boost * 0.15) *
+      confidenceBoost(entry)
     return {
       entry,
       score,
-      breakdown: { recency, importance: entry.importance, relevance: bm25, pagerank, rrf: rrfScore },
+      breakdown: { recency, importance: entry.importance, relevance: bm25, pagerank, rrf: rrfScores.get(path) },
     }
   })
 
   ranked.sort((a, b) => b.score - a.score)
-  return ranked.slice(0, limit)
+  return diversify(ranked, limit)
+}
+
+function diversify(ranked: RankedEntry[], limit: number): RankedEntry[] {
+  const picked: RankedEntry[] = []
+  const seen: Set<string>[] = []
+  for (const r of ranked) {
+    if (picked.length >= limit) break
+    const t = candidateTokenize(r.entry.title + " " + r.entry.description)
+    if (seen.some((s) => jaccard(t, s) > 0.75)) continue
+    picked.push(r)
+    seen.push(t)
+  }
+  return picked
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0
+  let inter = 0
+  for (const x of a) if (b.has(x)) inter++
+  const union = a.size + b.size - inter
+  return union === 0 ? 0 : inter / union
 }
 
 function fileBoost(entry: MemoryEntry, active?: Set<string>): number {
   if (!active || active.size === 0) return 0
   const text = entry.doc.body + " " + (entry.doc.meta["refs"] ?? "")
+  let matches = 0
   for (const file of active) {
     const base = file.split("/").pop() ?? file
-    if (text.includes(base) || text.includes(file)) return 1
+    if (text.includes(file)) matches += 2
+    else if (base && text.includes(base)) matches += 1
   }
-  return 0
+  return Math.min(1, matches / 4)
 }
 
 const queryCache = new Map<string, { vector: Float32Array; ts: number }>()

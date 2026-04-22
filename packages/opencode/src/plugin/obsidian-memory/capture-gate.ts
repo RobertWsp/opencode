@@ -37,7 +37,7 @@ const log = Log.create({ service: "plugin.obsidian-memory.capture" })
  */
 
 export interface CaptureEventInput {
-  kind: "tool.after" | "session.error" | "user.message"
+  kind: "tool.after" | "session.error" | "user.message" | "chat.response"
   sessionID: string
   summary: string
   /** Optional deeper payload — tool name, file paths, error text */
@@ -79,6 +79,22 @@ export class CaptureGate {
   private scopeResolver: (sessionID: string) => Promise<Scope | null>
   private embedder: Embedder | null
   private getVectorStore: (() => VectorStore | undefined) | undefined
+  private dryRun = false
+  private stats = {
+    received: 0,
+    enqueued: 0,
+    skippedTrivial: 0,
+    skippedFiltered: 0,
+    skippedPaused: 0,
+    written: 0,
+    suggested: 0,
+    gateRejected: 0,
+    haikuFailed: 0,
+  }
+
+  getStats() {
+    return { ...this.stats }
+  }
 
   constructor(opts: {
     enabled: boolean
@@ -88,11 +104,13 @@ export class CaptureGate {
     contradictionDetection?: boolean
     embedder?: Embedder | null
     getVectorStore?: () => VectorStore | undefined
+    dryRun?: boolean
   }) {
     this.enabled = opts.enabled
+    this.dryRun = opts.dryRun ?? false
     this.model = opts.model
     this.suggestThreshold = opts.suggestThreshold ?? 0
-    this.contradictionDetection = opts.contradictionDetection ?? false
+    this.contradictionDetection = opts.contradictionDetection ?? true
     this.scopeResolver = opts.scopeResolver
     this.embedder = opts.embedder ?? null
     this.getVectorStore = opts.getVectorStore
@@ -121,12 +139,15 @@ export class CaptureGate {
    */
   async enqueue(ev: CaptureEventInput): Promise<void> {
     if (!this.enabled) return
+    this.stats.received++
     if (this.isPaused()) {
-      log.debug("enqueue skipped: circuit breaker paused", { sessionID: ev.sessionID })
+      this.stats.skippedPaused++
+      log.info("enqueue skipped: circuit breaker paused", { sessionID: ev.sessionID })
       return
     }
     if (isTrivial(ev)) {
-      log.debug("enqueue skipped: trivial event", {
+      this.stats.skippedTrivial++
+      log.info("enqueue skipped: trivial event", {
         sessionID: ev.sessionID,
         tool: ev.details?.["tool"],
       })
@@ -138,12 +159,21 @@ export class CaptureGate {
 
     const q = this.getQueue(ev.sessionID)
     if (isFilterable(ev, q)) {
-      log.debug("enqueue skipped: filtered (dedup or file cap)", {
+      this.stats.skippedFiltered++
+      log.info("enqueue skipped: filtered (dedup or file cap)", {
         sessionID: ev.sessionID,
         tool: ev.details?.["tool"],
       })
       return
     }
+    this.stats.enqueued++
+    log.info("enqueue accepted", {
+      sessionID: ev.sessionID,
+      tool: ev.details?.["tool"],
+      kind: ev.kind,
+      summary: ev.summary?.slice(0, 80),
+      queueSize: q.events.length + 1,
+    })
     q.events.push(ev)
 
     if (q.events.length >= IMMEDIATE_FLUSH_THRESHOLD || q.events.length >= BATCH_MAX_EVENTS) {
@@ -312,11 +342,13 @@ export class CaptureGate {
     })
 
     if (!result.ok) {
+      this.stats.haikuFailed++
       this.recordFailure(result.error ?? "unknown")
       log.info("gate call failed", {
         sessionID,
         error: result.error,
         duration: result.durationMs,
+        stats: this.stats,
       })
       return
     }
@@ -386,61 +418,19 @@ export class CaptureGate {
     const refsValue = [...batchFiles].slice(0, 20).join(",")
 
     if (decision.op === "NOOP") {
-      log.info("gate decided NOOP", { sessionID, reason: decision.reason, events: eventCount })
+      this.stats.gateRejected++
+      log.info("gate decided NOOP", { sessionID, reason: decision.reason, events: eventCount, stats: this.stats })
       return
     }
 
-    if (decision.op === "DELETE") {
-      if (!targetCandidate) {
-        log.info("gate DELETE without valid target — skipping", { sessionID, targetId: decision.targetId })
-        return
-      }
-      const ok = await invalidateNote(scope, targetCandidate.path, {
-        reason: decision.reason || "gate DELETE",
-        supersededBy: decision.supersedes,
-        commitMessage: `memory(invalidate): ${targetCandidate.title} — ${decision.reason || "gate"}`,
-      })
-      log.info("gate invalidated memory", { sessionID, path: targetCandidate.path, ok, duration: durationMs })
-      return
+    // ADD-only mode (mem0 v2 algorithm, +20pt accuracy): coerce UPDATE/DELETE
+    // into ADD so memories accumulate instead of being mutated. Dedup happens
+    // posthoc via similarity ranking in retrieval.
+    if (decision.op === "DELETE" || decision.op === "UPDATE") {
+      log.info("gate ADD-only mode: coercing op to ADD", { sessionID, originalOp: decision.op })
+      decision.op = "ADD"
     }
 
-    if (decision.op === "UPDATE") {
-      if (!targetCandidate) {
-        log.info("gate UPDATE without valid target — falling back to ADD", { sessionID })
-        decision.op = "ADD"
-      } else {
-        const probe = batch.map((ev) => ev.summary).join(" ") + " " + decision.title + " " + decision.body
-        const updateMeta: Record<string, string> = {
-          tags: decision.tags.join(","),
-          importance: String(decision.importance ?? 0.5),
-          links: decision.links.join(","),
-          refs: refsValue,
-          "memory-kind": decision.kind,
-          "last-merged-count": String(eventCount),
-        }
-        const rich = enrichWithTaskRefs(updateMeta, probe)
-        if (rich.task) updateMeta.task = rich.task
-        if (decision.confidence_tier) updateMeta["confidence"] = decision.confidence_tier
-        if (decision.confidence_score !== undefined) updateMeta["confidence_score"] = String(decision.confidence_score)
-        const ok = await rewriteNote(scope, targetCandidate.path, {
-          body: decision.body,
-          meta: updateMeta,
-          commitMessage: `memory(update): ${targetCandidate.title} [gate importance=${decision.importance}]`,
-        })
-        log.info("gate updated memory", {
-          sessionID,
-          path: targetCandidate.path,
-          ok,
-          importance: decision.importance,
-          kind: decision.kind,
-          links: decision.links.length,
-          duration: durationMs,
-        })
-        return
-      }
-    }
-
-    // ADD (default + fallback from failed UPDATE)
     // Links are stored in frontmatter only — no body wikilinks to avoid
     // dangling [[links]] in Obsidian when targets don't exist yet.
 
@@ -448,13 +438,15 @@ export class CaptureGate {
     // without committing, awaiting user approval via /memory approve.
     const goSuggest =
       this.suggestThreshold > 0 && decision.importance >= this.suggestThreshold
+    const autoLinks = findSimilarSlugs(decision, nearby, 0.15, 3)
+    const mergedLinks = Array.from(new Set([...decision.links, ...autoLinks]))
     const meta: Record<string, string> = {
       "memory-type": goSuggest ? "suggested" : "auto-capture",
       "memory-kind": decision.kind,
       source: "haiku-gate",
       importance: String(decision.importance ?? ""),
       tags: decision.tags.join(","),
-      links: decision.links.join(","),
+      links: mergedLinks.join(","),
       refs: refsValue,
       "event-count": String(eventCount),
     }
@@ -468,6 +460,16 @@ export class CaptureGate {
     if (decision.confidence_tier) meta["confidence"] = decision.confidence_tier
     if (decision.confidence_score !== undefined) meta["confidence_score"] = String(decision.confidence_score)
 
+    if (this.dryRun) {
+      log.info("gate dryRun: would write memory (not persisted)", {
+        sessionID,
+        title: decision.title,
+        kind: decision.kind,
+        importance: decision.importance,
+        suggested: goSuggest,
+      })
+      return
+    }
     const filepath = await writeNote(scope, {
       title: decision.title,
       meta,
@@ -479,6 +481,8 @@ export class CaptureGate {
         ? undefined
         : `memory(auto): capture "${decision.title}" [gate importance=${decision.importance}]`,
     })
+    if (goSuggest) this.stats.suggested++
+    else this.stats.written++
     log.info(goSuggest ? "gate suggested memory" : "gate captured memory", {
       sessionID,
       filepath,
@@ -488,6 +492,7 @@ export class CaptureGate {
       links: decision.links.length,
       suggested: goSuggest,
       duration: durationMs,
+      stats: this.stats,
     })
 
     const store = this.getVectorStore?.()
@@ -526,6 +531,39 @@ export class CaptureGate {
       }
     }
   }
+}
+
+export function findSimilarSlugs(
+  decision: { title: string; body: string },
+  candidates: MemoryEntry[],
+  threshold: number,
+  max: number,
+): string[] {
+  if (candidates.length === 0) return []
+  const newTokens = linkTokens(decision.title + " " + decision.body.slice(0, 500))
+  const matches: Array<{ slug: string; sim: number }> = []
+  for (const c of candidates) {
+    if (c.supersededBy !== null || c.validUntil !== null) continue
+    const oldTokens = linkTokens(c.title + " " + c.doc.body.slice(0, 500))
+    const s = linkJaccard(newTokens, oldTokens)
+    if (s < threshold) continue
+    const slug = c.doc.path.split("/").pop()?.replace(/\.md$/, "") ?? ""
+    if (slug) matches.push({ slug, sim: s })
+  }
+  matches.sort((a, b) => b.sim - a.sim)
+  return matches.slice(0, max).map((m) => m.slug)
+}
+
+function linkTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/\W+/).filter((w) => w.length > 2))
+}
+
+function linkJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0
+  let inter = 0
+  for (const x of a) if (b.has(x)) inter++
+  const union = a.size + b.size - inter
+  return union === 0 ? 0 : inter / union
 }
 
 function extractCommitMeta(batch: CaptureEventInput[]): Record<string, string> {
@@ -635,52 +673,112 @@ function isFilterable(ev: CaptureEventInput, q: QueueState): boolean {
 
 // ─── gate prompt ────────────────────────────────────────────────────────
 
-const GATE_SYSTEM_PROMPT = `You are a memory-capture gate for a coding assistant that manages a
-persistent markdown vault (Obsidian-style).
+const GATE_SYSTEM_PROMPT = `You are a memory-capture gate for a coding assistant that manages a persistent markdown vault (Obsidian-style).
 
-You receive: (1) the user's latest intent, (2) a batch of tool events from
-the current session, and (3) a list of existing CANDIDATE memories that are
-similar to the new batch (retrieved by simple token overlap).
+You receive: (1) the user's latest intent, (2) a batch of tool events from the current session, (3) a list of existing CANDIDATE memories similar to the new batch, (4) the complete list of vault note titles.
 
-Your job is to choose ONE operation:
+Your job: choose ONE operation — ADD / UPDATE / DELETE / NOOP.
 
-- "ADD"    — none of the candidates match; create a new memory
-- "UPDATE" — a candidate covers the same topic; merge the new info in-place
-- "DELETE" — a candidate is now contradicted / obsolete and should be marked invalid
-- "NOOP"   — nothing here is worth remembering (be conservative)
+## EXTRACTION PRINCIPLES (mem0 v3)
 
-Be AGGRESSIVE with NOOP. Only save surprising gotchas, non-obvious decisions,
-procedural skills (how-to), or facts the next session would clearly benefit
-from knowing. Skip routine file reads, greps, normal edits.
+1. **When in doubt, EXTRACT.** A slightly redundant memory is far less costly than a missing one. Downstream dedup + diversity handle duplicates. Over-NOOP is the failure mode — don't be excessively conservative.
 
-CRITICAL: The "links" field must ONLY contain titles of notes that ALREADY
-EXIST in the vault. You will be given a complete list of all vault note titles
-below. Pick 0-5 that are related to the new memory. Do NOT invent titles —
-every link must exactly match a title from the "All vault titles" list. If the
-vault is empty, "links" MUST be an empty array [].
+2. **Contextually rich, NOT atomic.** Capture the full picture — fact + surrounding context — in ONE unified memory, not scattered fragments.
+   BAD: "User uses JWT"
+   GOOD: "Project chose JWT (15min access + 7d refresh) over session-cookies after rejecting server-side session overhead. Tokens in httpOnly cookies, implemented in src/auth/ on 2026-04-12."
 
-Categorize "kind" as one of: fact, decision, gotcha, skill, episode, convention.
+3. **Preserve specific details — NEVER generalize.** Proper nouns, file paths, function names, package names, version numbers, quantities MUST survive into the body. Users search BY name — a memory without the name is unfindable.
+   BAD: "Installed a router library"
+   GOOD: "Installed @tanstack/react-router v1.91 (not react-router-dom); configured in src/router/index.ts with createFileRoute pattern"
 
-Output STRICTLY valid JSON matching this shape, no markdown fences, no prose:
+4. **Capture transitions (delta, not just state).** When something changes, capture WHAT changed AND FROM WHAT. The relationship between old and new is the valuable context.
+   BAD: "Uses bun:test for testing"
+   GOOD: "Switched from vitest to bun:test on 2026-04-20 after flaky fake-timer issues; test files now use 'import { test } from \\"bun:test\\"' instead of vitest globals"
+
+5. **Extract from BOTH user intent AND tool events.** Assistant-confirmed actions ('wrote X', 'fixed Y', 'decided Z') are as memorable as user statements. Don't skip capture just because it came from the tool output side.
+
+6. **Incidental facts count.** If user mentions 'we use X on this project' as drive-by context while asking something else, extract that fact as its own memory — don't let the primary question overshadow the contextual fact.
+
+7. **Temporal grounding.** When dates/durations appear in events, include them in the body ('on 2026-04-20', 'for 3 days', 'since v1.91'). Don't vaguely say 'recently' — pin concrete dates.
+
+## WHAT JUSTIFIES NOOP (be honest)
+
+- Routine file reads (cat/ls/read without subsequent decision)
+- Trivial greps that found expected results
+- Simple edits that don't change design
+- Pure conversational filler with no decision/gotcha/fact
+
+## WHAT TO EXTRACT (be generous)
+
+- **Decisions** — "chose X over Y because Z"
+- **Gotchas** — "X fails when Y because Z"
+- **Conventions** — "we always/never do X in this codebase"
+- **Procedures** — "to do X, run Y then Z"
+- **External facts** — API behaviors, package quirks, config requirements
+- **Contradictions** — new info conflicts with existing memory → UPDATE or DELETE
+
+## FEW-SHOT EXAMPLES
+
+### Example 1 — ADD (gotcha, rich context, specifics preserved)
+Events: "ran bun test", "test failed: 'setTimeout is not defined'", "added 'import { setTimeout } from \\"node:timers\\"' to src/debounce.test.ts"
+Decision: ADD
+{
+  "op":"ADD","kind":"gotcha","importance":0.7,
+  "title":"bun:test requires explicit timer imports",
+  "body":"bun:test does NOT auto-inject setTimeout/setInterval globals like vitest does. Test files must 'import { setTimeout } from \\"node:timers\\"' explicitly. Discovered on 2026-04-20 when src/debounce.test.ts failed after vitest→bun:test migration.\\n\\nRefs:\\n- src/debounce.test.ts",
+  "tags":["bun","testing","migration"],
+  "links":[]
+}
+
+### Example 2 — ADD (decision, captures transition)
+User intent: "vamos usar MSW pros tests da API?"
+Events: "installed msw@2", "wrote src/mocks/handlers.ts"
+Decision: ADD
+{
+  "op":"ADD","kind":"decision","importance":0.8,
+  "title":"MSW v2 for API test mocking",
+  "body":"Chose MSW v2 over vi.fn/jest.fn mocks for API integration tests because MSW tests the full fetch pipeline including headers, status codes, and error paths. Decided on 2026-04-20. Handlers colocated in src/mocks/handlers.ts, imported per test file.\\n\\nRefs:\\n- src/mocks/handlers.ts\\n- package.json",
+  "tags":["testing","mocking","api"],
+  "links":["JWT auth decision"]
+}
+
+### Example 3 — NOOP (honest, routine)
+Events: "ran ls src/", "read src/util.ts", "ran grep 'debounce' src/"
+Decision: NOOP
+{"op":"NOOP","reason":"routine exploration with no decisions, gotchas, or surprising findings"}
+
+### Example 4 — UPDATE (delta on existing decision)
+Candidates: "cand_0: JWT auth 15min+7d refresh"
+Events: "edited src/auth/config.ts", "refresh token extended from 7d to 30d per user feedback"
+Decision: UPDATE
+{
+  "op":"UPDATE","targetId":"cand_0","kind":"decision","importance":0.7,
+  "title":"JWT auth 15min+30d refresh",
+  "body":"JWT auth: 15min access + 30d refresh (extended from 7d on 2026-04-20 after user feedback about re-login friction). Tokens in httpOnly cookies. src/auth/config.ts.\\n\\nRefs:\\n- src/auth/config.ts",
+  "tags":["auth","jwt"],
+  "links":[]
+}
+
+## OUTPUT FORMAT (strict JSON, no markdown fences, no prose outside JSON)
 
 {
   "op": "ADD" | "UPDATE" | "DELETE" | "NOOP",
   "reason": "one-line why",
-  "targetId": "cand_0" | "cand_1" | ... (only if UPDATE or DELETE),
-  "kind": "fact",
-  "title": "short kebab-ish title (ADD/UPDATE)",
-  "body": "markdown body <= 40 lines (ADD/UPDATE). IMPORTANT: at the end of the body, include a 'Refs:' section listing the specific file paths from the tool events that are relevant, e.g. '\\nRefs:\\n- src/auth/middleware.ts\\n- src/config.ts'. Do NOT include a Related section — links are handled via the links field.",
-  "tags": ["tag1", "tag2"],
-  "links": ["exact title from the 'All vault titles' list"],
-  "supersedes": "candidate title" (only DELETE, optional),
-  "importance": 0.7,
+  "targetId": "cand_0" (only UPDATE/DELETE),
+  "kind": "fact" | "decision" | "gotcha" | "skill" | "episode" | "convention",
+  "title": "short descriptive title",
+  "body": "markdown body 5-40 lines with specifics and dates. End with 'Refs:' section listing relevant file paths. No 'Related:' section — links are via links field.",
+  "tags": ["tag1","tag2"],
+  "links": ["exact title from 'All vault titles' list"],
+  "supersedes": "candidate title" (DELETE only, optional),
+  "importance": 0.1-1.0,
   "confidence_tier": "extracted" | "inferred" | "ambiguous" (optional),
   "confidence_score": 0.0-1.0 (optional)
 }
 
 When op=NOOP, only "op" and "reason" are required.
 
-Importance scale: 0.1 = trivial, 0.5 = useful context, 0.9 = critical gotcha.
+Importance: 0.1 trivial | 0.5 useful context | 0.7 notable decision/gotcha | 0.9 critical gotcha.
 
 Confidence tier (optional — omit if uncertain):
 - "extracted": user explicitly stated the fact ("we use JWT", "decided to pick X")
@@ -690,7 +788,9 @@ Confidence tier (optional — omit if uncertain):
 Confidence score (optional — include when tier is set):
 - 0.9: strong direct evidence (user stated it, commit message confirms it)
 - 0.6: moderate evidence (consistent tool output + context)
-- 0.3: weak signal (single ambiguous event, indirect reference)`
+- 0.3: weak signal (single ambiguous event, indirect reference)
+
+CRITICAL: "links" field must ONLY contain EXACT titles from the "All vault titles" list provided in the user message. Do NOT invent titles. If vault is empty, "links" MUST be [].`
 
 function buildGateUserMessage(
   batch: CaptureEventInput[],

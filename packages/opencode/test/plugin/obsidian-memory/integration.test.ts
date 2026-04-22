@@ -243,7 +243,7 @@ describe("ObsidianMemoryPlugin experimental.chat.system.transform hook", () => {
       { sessionID: "ses_x", model: { providerID: "anthropic", modelID: "claude" } } as never,
       output as never,
     )
-    expect(output.system).toHaveLength(2)
+    expect(output.system).toHaveLength(3)
     expect(output.system[1]).toContain("<memory-block")
     expect(output.system[1]).toContain("important fact")
   })
