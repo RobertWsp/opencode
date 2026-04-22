@@ -29,6 +29,7 @@ export function toEntry(doc: MemoryDoc): MemoryEntry {
   const kind = resolveKind(meta)
   const confidence = coerceConfidence(meta["confidence"])
   const confidence_score = parseOptionalFloat(meta["confidence_score"])
+  const rationale = typeof meta["rationale"] === "string" ? meta["rationale"] : undefined
 
   return {
     doc,
@@ -44,6 +45,7 @@ export function toEntry(doc: MemoryDoc): MemoryEntry {
     supersededBy,
     confidence,
     confidence_score,
+    rationale,
   }
 }
 

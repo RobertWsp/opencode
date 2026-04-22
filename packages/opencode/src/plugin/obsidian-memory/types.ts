@@ -207,6 +207,8 @@ export interface MemoryEntry {
   confidence?: Confidence
   /** Numeric confidence score in `[0, 1]`. Optional; undefined on legacy. */
   confidence_score?: number
+  /** Human-readable rationale captured by the gate. Optional; undefined on legacy. */
+  rationale?: string
 }
 
 export interface VaultDocs {
