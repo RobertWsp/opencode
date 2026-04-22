@@ -15,6 +15,7 @@ import { AnthropicAuthPlugin } from "./anthropic"
 import { ObsidianMemoryPlugin } from "./obsidian-memory"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
 import { CodeGraphPlugin } from "./code-graph"
+import { isPluginEnabled } from "./registry"
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -52,6 +53,10 @@ export namespace Plugin {
     }
 
     for (const plugin of INTERNAL_PLUGINS) {
+      if (!(await isPluginEnabled(plugin.name))) {
+        log.warn("plugin disabled by registry", { name: plugin.name })
+        continue
+      }
       log.info("loading internal plugin", { name: plugin.name })
       const init = await plugin(input).catch((err) => {
         log.error("failed to load internal plugin", { name: plugin.name, error: err })
