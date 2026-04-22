@@ -12,9 +12,13 @@ Add to your project's `opencode.jsonc`:
 
 ```jsonc
 {
-  "codeGraph": {
+  "code_graph": {
     "enabled": true,
-    "autoBuild": false
+    "autoBuild": false,
+    "watch": true,
+    "dbPath": ".opencode/code-graph.db",
+    "languages": ["ts", "tsx", "js", "jsx", "py", "go", "rs"],
+    "maxFileBytes": 524288
   }
 }
 ```
