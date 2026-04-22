@@ -334,10 +334,11 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         else if (verb === "reject") result = await Commands.reject(scope, rest)
         else if (verb === "search") result = await Commands.search(scope, rest)
         else if (verb === "health") result = await Commands.health(scope)
+        else if (verb === "community") result = await Commands.community(scope, rest)
         else
           result = {
             ok: false,
-            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject|search|health`,
+            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject|search|health|community`,
           }
       } catch (err) {
         result = { ok: false, text: `[memory] error: ${err instanceof Error ? err.message : String(err)}` }

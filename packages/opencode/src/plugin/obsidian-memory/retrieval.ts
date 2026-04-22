@@ -389,6 +389,24 @@ export async function hybridRank(
   })
 
   ranked.sort((a, b) => b.score - a.score)
+
+  // Community-aware boost: when top-K spans ≥2 communities, nudge the
+  // majority community up by 5% so semantically-clustered notes win ties.
+  const topK = ranked.slice(0, limit)
+  const vi = getVaultIndex(scope.vaultRoot)
+  const topCommunities = topK
+    .map((r) => vi.getCommunity(r.entry.doc.path))
+    .filter((c): c is number => c !== null)
+  if (new Set(topCommunities).size >= 2) {
+    const freq = new Map<number, number>()
+    for (const c of topCommunities) freq.set(c, (freq.get(c) ?? 0) + 1)
+    const majority = [...freq.entries()].sort((a, b) => b[1] - a[1])[0][0]
+    for (const r of ranked) {
+      if (vi.getCommunity(r.entry.doc.path) === majority) r.score *= 1.05
+    }
+    ranked.sort((a, b) => b.score - a.score)
+  }
+
   return diversify(ranked, limit)
 }
 
