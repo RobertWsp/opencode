@@ -56,6 +56,7 @@ export interface HaikuCallArgs {
   userMessage: string
   maxTokens?: number
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 export interface HaikuCallResult {
@@ -97,6 +98,7 @@ export async function callHaiku(args: HaikuCallArgs): Promise<HaikuCallResult> {
       body,
       timeoutMs,
       started,
+      signal: args.signal,
     })
     if (result.ok || !result.error?.startsWith("HTTP 429")) return result
   }
@@ -133,6 +135,7 @@ export async function callHaiku(args: HaikuCallArgs): Promise<HaikuCallResult> {
     body: oauthBody,
     timeoutMs,
     started,
+    signal: args.signal,
   })
 }
 
@@ -142,8 +145,11 @@ async function post(args: {
   body: string
   timeoutMs: number
   started: number
+  signal?: AbortSignal
 }): Promise<HaikuCallResult> {
   const controller = new AbortController()
+  if (args.signal?.aborted) return { ok: false, error: "aborted", durationMs: 0 }
+  args.signal?.addEventListener("abort", () => controller.abort(), { once: true })
   const timer = setTimeout(() => controller.abort(), args.timeoutMs)
   try {
     const response = await fetch(args.endpoint, {

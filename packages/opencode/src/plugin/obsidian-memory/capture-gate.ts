@@ -180,7 +180,7 @@ export class CaptureGate {
    * Force a flush for a session (e.g. on session.idle). Debounces are
    * cancelled and a single Haiku call is made with whatever is queued.
    */
-  async flush(sessionID: string): Promise<void> {
+  async flush(sessionID: string, signal?: AbortSignal): Promise<void> {
     if (!this.enabled) return
     const q = this.queues.get(sessionID)
     if (!q || q.events.length < BATCH_MIN_EVENTS || q.flushing) return
@@ -190,10 +190,15 @@ export class CaptureGate {
       q.timer = null
     }
 
+    if (signal?.aborted) {
+      log.info("abort received, cleaning up", { sessionID })
+      return
+    }
+
     q.flushing = true
     const batch = q.events.slice(0, BATCH_MAX_EVENTS)
     try {
-      await this.runGate(sessionID, batch, q.lastUserPrompt)
+      await this.runGate(sessionID, batch, q.lastUserPrompt, signal)
       // Only remove events after successful processing
       q.events.splice(0, Math.min(q.events.length, BATCH_MAX_EVENTS))
     } catch (err) {
@@ -259,6 +264,7 @@ export class CaptureGate {
     sessionID: string,
     batch: CaptureEventInput[],
     userPrompt: string | undefined,
+    signal?: AbortSignal,
   ): Promise<void> {
     const scope = await this.scopeResolver(sessionID)
     if (!scope) return
@@ -302,6 +308,7 @@ export class CaptureGate {
       userMessage: payload,
       maxTokens: 1200,
       timeoutMs: 25_000,
+      signal,
     })
 
     if (!result.ok) {

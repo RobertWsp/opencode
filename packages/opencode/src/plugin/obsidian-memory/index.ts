@@ -577,12 +577,12 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       }
     },
 
-    async event({ event }: { event: { type: string; properties?: unknown } }) {
+    async event({ event, signal }: { event: { type: string; properties?: unknown }; signal?: AbortSignal }) {
       if (!captureGate) return
       if (event.type === "session.idle") {
         const props = event.properties as { sessionID?: string } | undefined
         if (props?.sessionID) {
-          await captureGate.flush(props.sessionID).catch(() => undefined)
+          await captureGate.flush(props.sessionID, signal).catch(() => undefined)
           if (cfgRef?.sessionSummary) {
             const evs = sessionEvents.get(props.sessionID) ?? []
             const files = sessionFiles.get(props.sessionID) ?? new Set<string>()
