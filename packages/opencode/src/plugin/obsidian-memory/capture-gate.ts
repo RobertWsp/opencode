@@ -457,10 +457,11 @@ export class CaptureGate {
     const probe = batch.map((ev) => ev.summary).join(" ") + " " + decision.title + " " + decision.body
     const rich = enrichWithTaskRefs(meta, probe)
     if (rich.task) meta.task = rich.task
-    if (decision.confidence_tier) meta["confidence"] = decision.confidence_tier
-    if (decision.confidence_score !== undefined) meta["confidence_score"] = String(decision.confidence_score)
+     if (decision.confidence_tier) meta["confidence"] = decision.confidence_tier
+     if (decision.confidence_score !== undefined) meta["confidence_score"] = String(decision.confidence_score)
+     if (decision.rationale) meta.rationale = decision.rationale
 
-    if (this.dryRun) {
+     if (this.dryRun) {
       log.info("gate dryRun: would write memory (not persisted)", {
         sessionID,
         title: decision.title,
@@ -725,6 +726,7 @@ Decision: ADD
 {
   "op":"ADD","kind":"gotcha","importance":0.7,
   "title":"bun:test requires explicit timer imports",
+  "rationale":"bun mimics Node.js runtime behavior; vitest injected globals for convenience",
   "body":"bun:test does NOT auto-inject setTimeout/setInterval globals like vitest does. Test files must 'import { setTimeout } from \\"node:timers\\"' explicitly. Discovered on 2026-04-20 when src/debounce.test.ts failed after vitest→bun:test migration.\\n\\nRefs:\\n- src/debounce.test.ts",
   "tags":["bun","testing","migration"],
   "links":[]
@@ -737,6 +739,7 @@ Decision: ADD
 {
   "op":"ADD","kind":"decision","importance":0.8,
   "title":"MSW v2 for API test mocking",
+  "rationale":"MSW tests full fetch pipeline (headers, status, errors); unit mocks skip those layers",
   "body":"Chose MSW v2 over vi.fn/jest.fn mocks for API integration tests because MSW tests the full fetch pipeline including headers, status codes, and error paths. Decided on 2026-04-20. Handlers colocated in src/mocks/handlers.ts, imported per test file.\\n\\nRefs:\\n- src/mocks/handlers.ts\\n- package.json",
   "tags":["testing","mocking","api"],
   "links":["JWT auth decision"]
@@ -767,6 +770,7 @@ Decision: UPDATE
   "targetId": "cand_0" (only UPDATE/DELETE),
   "kind": "fact" | "decision" | "gotcha" | "skill" | "episode" | "convention",
   "title": "short descriptive title",
+  "rationale": "1-2 sentences WHY (required for decision/gotcha/convention; omit for fact/skill/episode)",
   "body": "markdown body 5-40 lines with specifics and dates. End with 'Refs:' section listing relevant file paths. No 'Related:' section — links are via links field.",
   "tags": ["tag1","tag2"],
   "links": ["exact title from 'All vault titles' list"],
@@ -840,6 +844,7 @@ export interface GateDecision {
   targetId?: string
   kind: MemoryKind
   title: string
+  rationale?: string
   body: string
   tags: string[]
   links: string[]
@@ -877,6 +882,7 @@ export function parseGateResponse(raw: string): GateDecision | null {
       targetId: typeof parsed.targetId === "string" ? parsed.targetId : undefined,
       kind: coerceMemoryKind(typeof parsed.kind === "string" ? parsed.kind : undefined),
       title: typeof parsed.title === "string" ? parsed.title : "",
+      rationale: typeof parsed.rationale === "string" ? parsed.rationale : undefined,
       body: typeof parsed.body === "string" ? parsed.body : "",
       tags: Array.isArray(parsed.tags)
         ? (parsed.tags as string[]).filter((t) => typeof t === "string")
