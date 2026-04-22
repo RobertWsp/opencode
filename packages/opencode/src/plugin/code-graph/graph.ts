@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { NodeKind, EdgeKind } from "./types"
 import type { GraphNode, Language } from "./types"
 
-interface NodeRow {
+export interface NodeRow {
   id: string
   kind: string
   name: string
@@ -19,7 +19,7 @@ interface NodeRow {
   updated_at: number
 }
 
-function toNode(r: NodeRow): GraphNode {
+export function toNode(r: NodeRow): GraphNode {
   return {
     id: r.id,
     kind: r.kind as NodeKind,
@@ -38,7 +38,7 @@ function toNode(r: NodeRow): GraphNode {
   }
 }
 
-const COLS = "n.id, n.kind, n.name, n.qualified_name, n.file_path, n.line_start, n.line_end, n.language, n.parent_name, n.signature, n.is_test, n.file_hash, n.extra, n.updated_at"
+export const COLS = "n.id, n.kind, n.name, n.qualified_name, n.file_path, n.line_start, n.line_end, n.language, n.parent_name, n.signature, n.is_test, n.file_hash, n.extra, n.updated_at"
 
 export function callers(db: Database, qn: string, maxDepth = 10): GraphNode[] {
   const sql = `
