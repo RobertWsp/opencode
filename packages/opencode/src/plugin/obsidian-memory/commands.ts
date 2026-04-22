@@ -4,6 +4,7 @@ import { parseFrontmatter } from "./frontmatter"
 import { aggregateStats, readRecent } from "./injection-log"
 import { writeNote } from "./vault"
 import { VaultGit } from "./vault-git"
+import { getVaultIndex } from "./vault-index"
 import type { Scope } from "./types"
 
 /**
@@ -102,30 +103,35 @@ export async function list(scope: Scope): Promise<CommandResult> {
 /**
  * `/memory stats` — aggregate counts and latency over the recent injection log.
  */
-export async function stats(_scope: Scope): Promise<CommandResult> {
+export async function stats(scope: Scope): Promise<CommandResult> {
   const entries = await readRecent(500)
-  if (entries.length === 0) {
-    return { ok: true, text: "[memory] no log entries yet" }
-  }
-  const s = aggregateStats(entries)
   const lines: string[] = []
-  lines.push("[memory] stats (last 500 events)")
-  lines.push(`  injections: ${s.totalInjections}`)
-  lines.push(`  cache hit rate: ${(s.cacheHitRate * 100).toFixed(1)}%`)
-  lines.push(`  avg block size: ${s.avgBytes} bytes`)
-  lines.push(`  captures: ${s.totalCaptures}`)
-  lines.push(`  consolidations: ${s.totalConsolidations}`)
-  if (s.totalConsolidations > 0) {
-    lines.push(
-      `  ops: merge=${s.opCounts.merge} rewrite=${s.opCounts.rewrite} promote=${s.opCounts.promote} delete=${s.opCounts.delete}`,
-    )
-  }
-  if (s.byScope.length > 0) {
-    lines.push("  by scope:")
-    for (const row of s.byScope.slice(0, 5)) {
-      lines.push(`    ${row.scope}: ${row.injections} injections / ${row.captures} captures`)
+  if (entries.length === 0) {
+    lines.push("[memory] no log entries yet")
+  } else {
+    const s = aggregateStats(entries)
+    lines.push("[memory] stats (last 500 events)")
+    lines.push(`  injections: ${s.totalInjections}`)
+    lines.push(`  cache hit rate: ${(s.cacheHitRate * 100).toFixed(1)}%`)
+    lines.push(`  avg block size: ${s.avgBytes} bytes`)
+    lines.push(`  captures: ${s.totalCaptures}`)
+    lines.push(`  consolidations: ${s.totalConsolidations}`)
+    if (s.totalConsolidations > 0) {
+      lines.push(
+        `  ops: merge=${s.opCounts.merge} rewrite=${s.opCounts.rewrite} promote=${s.opCounts.promote} delete=${s.opCounts.delete}`,
+      )
+    }
+    if (s.byScope.length > 0) {
+      lines.push("  by scope:")
+      for (const row of s.byScope.slice(0, 5)) {
+        lines.push(`    ${row.scope}: ${row.injections} injections / ${row.captures} captures`)
+      }
     }
   }
+  try {
+    const c = getVaultIndex(scope.vaultRoot).communityStats()
+    lines.push(`  communities: { total: ${c.total}, largest: ${c.largest}, isolates: ${c.isolates} }`)
+  } catch {}
   return { ok: true, text: lines.join("\n") }
 }
 
@@ -273,6 +279,15 @@ function textOf(msg: { info: unknown; parts: unknown[] } | undefined): string {
     }
   }
   return chunks.join("\n")
+}
+
+export async function community(scope: Scope, p: string): Promise<CommandResult> {
+  if (!p.trim()) return { ok: false, text: "[memory] usage: /memory community <path>" }
+  const vi = getVaultIndex(scope.vaultRoot)
+  const id = vi.getCommunity(p.trim())
+  if (id === null) return { ok: true, text: JSON.stringify({ error: `No community for: ${p.trim()}` }) }
+  const neighbors = vi.communityNeighbors(p.trim(), id, 5)
+  return { ok: true, text: JSON.stringify({ community_id: id, neighbors }) }
 }
 
 /**

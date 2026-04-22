@@ -345,6 +345,19 @@ export class VaultIndex {
     return { total, largest, isolates }
   }
 
+  communityNeighbors(p: string, communityId: number, limit: number): string[] {
+    this.open()
+    return this.db!
+      .query<{ path: string }, [number, string, number]>(
+        `SELECT c.path FROM communities c
+         JOIN memories m ON m.path = c.path
+         WHERE c.community_id = ? AND c.path != ?
+         ORDER BY m.mtime_ms DESC LIMIT ?`,
+      )
+      .all(communityId, p, limit)
+      .map((r) => r.path)
+  }
+
   lastCommunityBuild(): number | null {
     this.open()
     const row = this.db!
