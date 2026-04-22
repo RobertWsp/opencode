@@ -341,3 +341,44 @@ describe("hybridRank — breakdown field", () => {
     expect(result[0].breakdown.pagerank).toBe(0)
   })
 })
+
+describe("hybridRank — confidence boost", () => {
+  test("extracted ranks above ambiguous for otherwise identical entries", async () => {
+    const scope = await makeScope()
+    await writeNote(scope, {
+      title: "ambiguous-entry",
+      body: "jwt token authentication",
+      meta: { importance: "0.5", confidence: "ambiguous" },
+      skipCommit: true,
+    })
+    await writeNote(scope, {
+      title: "extracted-entry",
+      body: "jwt token authentication",
+      meta: { importance: "0.5", confidence: "extracted" },
+      skipCommit: true,
+    })
+
+    const result = await hybridRank(scope, "jwt token", { useFts5: false })
+    expect(result[0].entry.title).toBe("extracted-entry")
+  })
+
+  test("minConfidence filter excludes entries below threshold", async () => {
+    const scope = await makeScope()
+    await writeNote(scope, {
+      title: "ambiguous-only",
+      body: "some content",
+      meta: { importance: "0.9", confidence: "ambiguous" },
+      skipCommit: true,
+    })
+    await writeNote(scope, {
+      title: "extracted-only",
+      body: "some content",
+      meta: { importance: "0.5", confidence: "extracted" },
+      skipCommit: true,
+    })
+
+    const result = await hybridRank(scope, "", { useFts5: false, minConfidence: "inferred" })
+    expect(result).toHaveLength(1)
+    expect(result[0].entry.title).toBe("extracted-only")
+  })
+})
