@@ -18,6 +18,8 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-au
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
 
+  export const DEFAULT_HOOK_TIMEOUT_MS = 30_000
+
   const BUILTIN: string[] = []
 
   // Built-in plugins that are directly imported (not installed from npm)
@@ -111,6 +113,27 @@ export namespace Plugin {
     }
   })
 
+  export async function withTimeout<T>(
+    name: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+    ms: number = DEFAULT_HOOK_TIMEOUT_MS,
+  ): Promise<T | undefined> {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        ctrl.abort()
+        log.info(`plugin hook ${name} aborted after ${ms}ms`)
+        resolve(undefined)
+      }, ms)
+    })
+    try {
+      return await Promise.race([fn(ctrl.signal), timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   export async function trigger<
     Name extends Exclude<keyof Required<Hooks>, "auth" | "event" | "tool">,
     Input = Parameters<Required<Hooks>[Name]>[0],
@@ -120,10 +143,20 @@ export namespace Plugin {
     for (const hook of await state().then((x) => x.hooks)) {
       const fn = hook[name]
       if (!fn) continue
-      // @ts-expect-error if you feel adventurous, please fix the typing, make sure to bump the try-counter if you
-      // give up.
-      // try-counter: 2
-      await fn(input, output)
+      try {
+        await withTimeout(String(name), async (signal) => {
+          // @ts-expect-error if you feel adventurous, please fix the typing, make sure to bump the try-counter if you
+          // give up.
+          // try-counter: 2
+          return fn({ ...input, signal }, output)
+        })
+      } catch (err) {
+        log.error("plugin hook threw — isolating", {
+          hook: String(name),
+          error: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack?.slice(0, 500) : undefined,
+        })
+      }
     }
     return output
   }
@@ -142,9 +175,16 @@ export namespace Plugin {
     Bus.subscribeAll(async (input) => {
       const hooks = await state().then((x) => x.hooks)
       for (const hook of hooks) {
-        hook["event"]?.({
-          event: input,
-        })
+        try {
+          await withTimeout("event", async (signal) => {
+            const payload = { event: input, signal }
+            return hook["event"]?.(payload)
+          })
+        } catch (err) {
+          log.error("plugin event hook threw — isolating", {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
     })
   }
