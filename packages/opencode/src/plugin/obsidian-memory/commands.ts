@@ -2,10 +2,11 @@ import { promises as fs } from "fs"
 import path from "path"
 import { parseFrontmatter } from "./frontmatter"
 import { aggregateStats, readRecent } from "./injection-log"
+import { rankMemories } from "./retrieval"
 import { writeNote } from "./vault"
 import { VaultGit } from "./vault-git"
 import { getVaultIndex } from "./vault-index"
-import type { Scope } from "./types"
+import type { MemoryEntry, Scope } from "./types"
 
 /**
  * Result of running a /memory subcommand. `text` is plain markdown that
@@ -348,6 +349,19 @@ export async function health(scope: Scope): Promise<CommandResult> {
   lines.push(`  vault root: ${scope.vaultRoot}`)
 
   return { ok: true, text: lines.join("\n") }
+}
+
+/**
+ * `memory.why <concept>` — retrieve rationale-annotated memories explaining
+ * why a concept or decision exists. Returns top-10 ranked results filtered
+ * to entries that have a non-empty `rationale` field, sorted by importance.
+ */
+export async function why(concept: string, scope: Scope): Promise<MemoryEntry[]> {
+  const results = await rankMemories(scope, concept, { limit: 10 })
+  return results
+    .filter((r) => r.entry.rationale && r.entry.rationale.trim().length > 0)
+    .sort((a, b) => b.entry.importance - a.entry.importance)
+    .map((r) => r.entry)
 }
 
 function errorMessage(err: unknown): string {
