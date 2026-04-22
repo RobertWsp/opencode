@@ -14,6 +14,7 @@ import { CopilotAuthPlugin } from "./copilot"
 import { AnthropicAuthPlugin } from "./anthropic"
 import { ObsidianMemoryPlugin } from "./obsidian-memory"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
+import { CodeGraphPlugin } from "./code-graph"
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -29,6 +30,7 @@ export namespace Plugin {
     CopilotAuthPlugin,
     GitlabAuthPlugin,
     ObsidianMemoryPlugin,
+    CodeGraphPlugin,
   ]
 
   const state = Instance.state(async () => {
