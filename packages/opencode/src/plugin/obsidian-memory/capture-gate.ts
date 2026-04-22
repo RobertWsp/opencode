@@ -8,8 +8,8 @@ import { isValidAt, titleToSlug, toEntry } from "./parse-entry"
 import { enrichWithTaskRefs } from "./task-linker"
 import { invalidateNote, rewriteNote, writeNote } from "./vault"
 import { stripPrivate, sanitizeRecord } from "./privacy"
-import type { MemoryEntry, MemoryKind, Scope } from "./types"
-import { coerceMemoryKind } from "./types"
+import type { Confidence, MemoryEntry, MemoryKind, Scope } from "./types"
+import { coerceConfidence, coerceMemoryKind } from "./types"
 
 const log = Log.create({ service: "plugin.obsidian-memory.capture" })
 
@@ -413,6 +413,8 @@ export class CaptureGate {
         }
         const rich = enrichWithTaskRefs(updateMeta, probe)
         if (rich.task) updateMeta.task = rich.task
+        if (decision.confidence_tier) updateMeta["confidence"] = decision.confidence_tier
+        if (decision.confidence_score !== undefined) updateMeta["confidence_score"] = String(decision.confidence_score)
         const ok = await rewriteNote(scope, targetCandidate.path, {
           body: decision.body,
           meta: updateMeta,
@@ -456,6 +458,8 @@ export class CaptureGate {
     const probe = batch.map((ev) => ev.summary).join(" ") + " " + decision.title + " " + decision.body
     const rich = enrichWithTaskRefs(meta, probe)
     if (rich.task) meta.task = rich.task
+    if (decision.confidence_tier) meta["confidence"] = decision.confidence_tier
+    if (decision.confidence_score !== undefined) meta["confidence_score"] = String(decision.confidence_score)
 
     const filepath = await writeNote(scope, {
       title: decision.title,
@@ -662,12 +666,24 @@ Output STRICTLY valid JSON matching this shape, no markdown fences, no prose:
   "tags": ["tag1", "tag2"],
   "links": ["exact title from the 'All vault titles' list"],
   "supersedes": "candidate title" (only DELETE, optional),
-  "importance": 0.7
+  "importance": 0.7,
+  "confidence_tier": "extracted" | "inferred" | "ambiguous" (optional),
+  "confidence_score": 0.0-1.0 (optional)
 }
 
 When op=NOOP, only "op" and "reason" are required.
 
-Importance scale: 0.1 = trivial, 0.5 = useful context, 0.9 = critical gotcha.`
+Importance scale: 0.1 = trivial, 0.5 = useful context, 0.9 = critical gotcha.
+
+Confidence tier (optional — omit if uncertain):
+- "extracted": user explicitly stated the fact ("we use JWT", "decided to pick X")
+- "inferred": deduced from tool events without explicit user statement
+- "ambiguous": reasonable guess from weak signals; flag for review
+
+Confidence score (optional — include when tier is set):
+- 0.9: strong direct evidence (user stated it, commit message confirms it)
+- 0.6: moderate evidence (consistent tool output + context)
+- 0.3: weak signal (single ambiguous event, indirect reference)`
 
 function buildGateUserMessage(
   batch: CaptureEventInput[],
@@ -722,6 +738,8 @@ export interface GateDecision {
   links: string[]
   supersedes?: string
   importance: number
+  confidence_tier?: Confidence
+  confidence_score?: number
 }
 
 export function parseGateResponse(raw: string): GateDecision | null {
@@ -761,6 +779,11 @@ export function parseGateResponse(raw: string): GateDecision | null {
         : [],
       supersedes: typeof parsed.supersedes === "string" ? parsed.supersedes : undefined,
       importance: typeof parsed.importance === "number" ? parsed.importance : 0.5,
+      confidence_tier: coerceConfidence(parsed.confidence_tier),
+      confidence_score:
+        typeof parsed.confidence_score === "number"
+          ? Math.max(0, Math.min(1, parsed.confidence_score))
+          : undefined,
     }
   } catch {
     return null
