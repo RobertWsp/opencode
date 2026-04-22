@@ -1,4 +1,5 @@
 import { Log } from "../../util/log"
+import { rrfMerge } from "./rrf"
 import { loadAllEntries, tokenize as candidateTokenize } from "./candidate-retrieval"
 import { callHaiku } from "./haiku-client"
 import { isValidAt } from "./parse-entry"
@@ -70,6 +71,7 @@ export interface RankedEntry {
     importance: number
     relevance: number
     pagerank: number
+    rrf?: number
   }
 }
 
@@ -296,7 +298,6 @@ export async function hybridRank(
 ): Promise<RankedEntry[]> {
   const limit = opts.limit ?? 20
   const half = opts.recencyHalfLifeDays ?? 30
-  const w = { ...HYBRID_WEIGHTS, ...(opts.hybridWeights ?? {}) }
   const useFts = opts.useFts5 !== false
 
   const entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
@@ -312,11 +313,22 @@ export async function hybridRank(
     }
   }
 
-  const hasVector = vectorMap.size > 0
-  const effectiveBm25 = hasVector ? w.bm25 : w.bm25 + w.vector
-  const effectiveVector = hasVector ? w.vector : 0
+  const bm25RankMap = new Map<string, number>()
+  const vectorRankMap = new Map<string, number>()
+  const recencyRankMap = new Map<string, number>()
+  const pagerankRankMap = new Map<string, number>()
 
   const now = Date.now()
+  for (const entry of entries) {
+    const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
+    bm25RankMap.set(entry.doc.path, bm25Map.get(entry.doc.path) ?? 0)
+    vectorRankMap.set(entry.doc.path, vectorMap.get(entry.doc.path) ?? 0)
+    recencyRankMap.set(entry.doc.path, Math.exp(-ageDays / half))
+    pagerankRankMap.set(entry.doc.path, opts.pagerankScores?.get(entry.doc.path) ?? 0)
+  }
+
+  const rrfScores = rrfMerge([bm25RankMap, vectorRankMap, recencyRankMap, pagerankRankMap])
+
   const ranked: RankedEntry[] = entries.map((entry) => {
     const ageDays = Math.max(0, (now - entry.doc.mtimeMs) / (1000 * 60 * 60 * 24))
     const recency = Math.exp(-ageDays / half)
@@ -324,14 +336,13 @@ export async function hybridRank(
     const vector = vectorMap.get(entry.doc.path) ?? 0
     const pagerank = opts.pagerankScores?.get(entry.doc.path) ?? 0
     const boost = fileBoost(entry, opts.activeFiles)
-    const score =
-      bm25 * effectiveBm25 +
-      vector * effectiveVector +
-      recency * w.recency +
-      entry.importance * w.importance +
-      pagerank * w.pagerank +
-      boost * w.boost
-    return { entry, score, breakdown: { recency, importance: entry.importance, relevance: bm25, pagerank } }
+    const rrfScore = (rrfScores.get(entry.doc.path) ?? 0) + boost * 0.05
+    const score = rrfScore * (1 + entry.importance * 0.3)
+    return {
+      entry,
+      score,
+      breakdown: { recency, importance: entry.importance, relevance: bm25, pagerank, rrf: rrfScore },
+    }
   })
 
   ranked.sort((a, b) => b.score - a.score)
