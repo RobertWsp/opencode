@@ -4,7 +4,7 @@ import { loadAllEntries, tokenize as candidateTokenize } from "./candidate-retri
 import { callHaiku } from "./haiku-client"
 import { isValidAt } from "./parse-entry"
 import { filterActive } from "./forgetting"
-import type { MemoryEntry, Scope } from "./types"
+import type { Confidence, MemoryEntry, Scope } from "./types"
 import { VaultIndex, type FtsHit } from "./vault-index"
 import type { VectorStore } from "./vector-store"
 import type { Embedder } from "./embedder"
@@ -289,6 +289,17 @@ export interface HybridRankOptions {
   embedder?: Embedder | null
   queryVector?: Float32Array
   useFts5?: boolean
+  minConfidence?: Confidence
+}
+
+const CONFIDENCE_BOOST: Record<string, number> = {
+  extracted: 1.1,
+  inferred: 1.0,
+  ambiguous: 0.8,
+}
+
+function confidenceBoost(entry: MemoryEntry): number {
+  return CONFIDENCE_BOOST[entry.confidence ?? ""] ?? 1.0
 }
 
 export async function hybridRank(
@@ -300,7 +311,12 @@ export async function hybridRank(
   const half = opts.recencyHalfLifeDays ?? 30
   const useFts = opts.useFts5 !== false
 
-  const entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  const order: Record<string, number> = { extracted: 2, inferred: 1, ambiguous: 0 }
+  let entries = (await loadAllEntries(scope)).filter((e) => isValidAt(e))
+  if (opts.minConfidence) {
+    const min = order[opts.minConfidence] ?? 0
+    entries = entries.filter((e) => (order[e.confidence ?? ""] ?? -1) >= min)
+  }
   if (entries.length === 0) return []
 
   const bm25Map = await computeRelevance(scope, query, entries, useFts)
@@ -337,7 +353,7 @@ export async function hybridRank(
     const pagerank = opts.pagerankScores?.get(entry.doc.path) ?? 0
     const boost = fileBoost(entry, opts.activeFiles)
     const rrfScore = (rrfScores.get(entry.doc.path) ?? 0) + boost * 0.05
-    const score = rrfScore * (1 + entry.importance * 0.3)
+    const score = rrfScore * (1 + entry.importance * 0.3) * confidenceBoost(entry)
     return {
       entry,
       score,
