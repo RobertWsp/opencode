@@ -261,4 +261,28 @@ body`
     expect(serialized).toContain("tags: [jwt, auth, middleware]")
     expect(serialized).toContain("links: [auth-overview, middleware-guide]")
   })
+
+  test("confidence and confidence_score are scalars (NOT in LIST_KEYS)", () => {
+    const input = { confidence: "inferred", confidence_score: "0.7" }
+    const serialized = serializeFrontmatter(input, "body")
+    expect(serialized).toContain("confidence: inferred")
+    expect(serialized).toContain("confidence_score: 0.7")
+    expect(serialized).not.toContain("[inferred")
+    expect(serialized).not.toContain("[0.7")
+    const parsed = parseFrontmatter(serialized)
+    expect(parsed.meta.confidence).toBe("inferred")
+    expect(parsed.meta.confidence_score).toBe("0.7")
+  })
+
+  test("confidence parses from hand-written source", () => {
+    const source = `---
+title: test
+confidence: inferred
+confidence_score: 0.7
+---
+body`
+    const parsed = parseFrontmatter(source)
+    expect(parsed.meta.confidence).toBe("inferred")
+    expect(parsed.meta.confidence_score).toBe("0.7")
+  })
 })

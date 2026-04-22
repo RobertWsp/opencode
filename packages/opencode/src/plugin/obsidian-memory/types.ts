@@ -53,6 +53,32 @@ export function coerceMemoryKind(value: string | undefined): MemoryKind {
   return "fact"
 }
 
+/**
+ * Provenance tiers for captured memories (adopted from graphify):
+ * - `extracted`: explicitly stated by user
+ * - `inferred`: deduced from context
+ * - `ambiguous`: reasonable guess
+ */
+export type Confidence = "extracted" | "inferred" | "ambiguous"
+
+export const CONFIDENCE_TIERS: readonly Confidence[] = [
+  "extracted",
+  "inferred",
+  "ambiguous",
+] as const
+
+/**
+ * Silent coercion: returns a valid `Confidence` or `undefined` for any
+ * unknown/invalid input (legacy notes without the field, typos, wrong types).
+ * Never throws — backward compatible with notes that predate this field.
+ */
+export function coerceConfidence(raw: unknown): Confidence | undefined {
+  if (typeof raw !== "string") return undefined
+  return (CONFIDENCE_TIERS as readonly string[]).includes(raw)
+    ? (raw as Confidence)
+    : undefined
+}
+
 export interface MemoryConfig {
   enabled: boolean
   vaultPath?: string
@@ -174,6 +200,13 @@ export interface MemoryEntry {
   validUntil: string | null
   /** Wikilink slug of the note that superseded this one */
   supersededBy: string | null
+  /**
+   * Provenance tier from the capture gate. Optional — legacy notes may not
+   * have this field, in which case it is `undefined`.
+   */
+  confidence?: Confidence
+  /** Numeric confidence score in `[0, 1]`. Optional; undefined on legacy. */
+  confidence_score?: number
 }
 
 export interface VaultDocs {

@@ -1,5 +1,11 @@
 import path from "path"
-import { coerceMemoryKind, type MemoryDoc, type MemoryEntry, type MemoryKind } from "./types"
+import {
+  coerceConfidence,
+  coerceMemoryKind,
+  type MemoryDoc,
+  type MemoryEntry,
+  type MemoryKind,
+} from "./types"
 
 /**
  * Transform a raw `MemoryDoc` into an enriched `MemoryEntry` used by
@@ -21,6 +27,8 @@ export function toEntry(doc: MemoryDoc): MemoryEntry {
   const validUntil = meta["valid_until"] || meta["validUntil"] || null
   const supersededBy = parseSupersededBy(meta["superseded_by"] || meta["supersededBy"])
   const kind = resolveKind(meta)
+  const confidence = coerceConfidence(meta["confidence"])
+  const confidence_score = parseOptionalFloat(meta["confidence_score"])
 
   return {
     doc,
@@ -34,7 +42,16 @@ export function toEntry(doc: MemoryDoc): MemoryEntry {
     validFrom,
     validUntil: validUntil === "null" || validUntil === "" ? null : validUntil,
     supersededBy,
+    confidence,
+    confidence_score,
   }
+}
+
+function parseOptionalFloat(raw: string | undefined): number | undefined {
+  if (!raw) return undefined
+  const n = parseFloat(raw)
+  if (!Number.isFinite(n)) return undefined
+  return Math.max(0, Math.min(1, n))
 }
 
 /**
