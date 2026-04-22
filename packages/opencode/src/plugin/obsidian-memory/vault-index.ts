@@ -43,6 +43,15 @@ export interface FtsHit {
   score: number
 }
 
+const COMMUNITIES_SCHEMA = `
+CREATE TABLE IF NOT EXISTS communities (
+  path TEXT PRIMARY KEY,
+  community_id INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_communities_id ON communities(community_id);
+`
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memories (
   path TEXT PRIMARY KEY,
@@ -86,10 +95,12 @@ export class VaultIndex {
   open(): void {
     if (this.db) return
     this.db = new BunDatabase(this.dbPath, { create: true })
+    this.db.exec("PRAGMA foreign_keys = ON")
     this.db.exec("PRAGMA journal_mode = WAL")
     this.db.exec("PRAGMA synchronous = NORMAL")
     this.db.exec("PRAGMA busy_timeout = 5000")
     this.db.exec(SCHEMA)
+    this.db.exec(COMMUNITIES_SCHEMA)
   }
 
   close(): void {
@@ -289,6 +300,75 @@ export class VaultIndex {
     return indexCount !== fsCount
   }
 
+  upsertCommunities(map: Map<string, number>): void {
+    this.open()
+    const db = this.db!
+    const ts = Date.now()
+    const tx = db.transaction(() => {
+      db.query("DELETE FROM communities").run()
+      for (const [p, id] of map) {
+        db.query(
+          "INSERT OR REPLACE INTO communities (path, community_id, updated_at) VALUES (?, ?, ?)",
+        ).run(p, id, ts)
+      }
+    })
+    tx()
+  }
+
+  getCommunity(p: string): number | null {
+    this.open()
+    const row = this.db!
+      .query<{ community_id: number }, [string]>(
+        "SELECT community_id FROM communities WHERE path = ?",
+      )
+      .get(p)
+    return row?.community_id ?? null
+  }
+
+  communityStats(): { total: number; largest: number; isolates: number } {
+    this.open()
+    const db = this.db!
+    const total =
+      (db.query<{ n: number }, []>("SELECT COUNT(DISTINCT community_id) as n FROM communities").get() ?? { n: 0 }).n
+    const largest =
+      (db
+        .query<{ n: number }, []>(
+          "SELECT COUNT(*) as n FROM communities GROUP BY community_id ORDER BY n DESC LIMIT 1",
+        )
+        .get() ?? { n: 0 }).n
+    const isolates =
+      (db
+        .query<{ n: number }, []>(
+          "SELECT COUNT(*) as n FROM (SELECT community_id FROM communities GROUP BY community_id HAVING COUNT(*) = 1)",
+        )
+        .get() ?? { n: 0 }).n
+    return { total, largest, isolates }
+  }
+
+  lastCommunityBuild(): number | null {
+    this.open()
+    const row = this.db!
+      .query<{ ts: number | null }, []>("SELECT MAX(updated_at) as ts FROM communities")
+      .get()
+    return row?.ts ?? null
+  }
+
+  noteCount(): number {
+    this.open()
+    const row = this.db!
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) as n FROM memories WHERE valid_until IS NULL OR valid_until = '' OR valid_until > datetime('now')",
+      )
+      .get()
+    return row?.n ?? 0
+  }
+
+  lastMemoryWrite(): number | null {
+    this.open()
+    const row = this.db!.query<{ ts: number | null }, []>("SELECT MAX(mtime_ms) as ts FROM memories").get()
+    return row?.ts ?? null
+  }
+
   /**
    * Reconcile the index after a filesystem-only change. Cheap path check
    * by comparing mtime; calls `upsert` only when content differs.
@@ -311,6 +391,19 @@ export class VaultIndex {
     this.upsert(doc)
     return "upserted"
   }
+}
+
+// ─── singleton cache ──────────────────────────────────────────────
+
+const indexCache = new Map<string, VaultIndex>()
+
+export function getVaultIndex(root: string): VaultIndex {
+  let idx = indexCache.get(root)
+  if (!idx) {
+    idx = new VaultIndex(root)
+    indexCache.set(root, idx)
+  }
+  return idx
 }
 
 // ─── helpers ─────────────────────────────────────────────────────

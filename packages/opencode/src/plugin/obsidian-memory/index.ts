@@ -7,6 +7,8 @@ import { logEntry } from "./injection-log"
 import { verifyDocRefs } from "./refs"
 import { detectGitEvent, detectGhEvent, toCaptureEvent } from "./git-event-detector"
 import { computePageRank, seedsFromPrompt } from "./pagerank"
+import { buildCommunities } from "./communities"
+import { getVaultIndex } from "./vault-index"
 import { noteSessionIdle, runReflection } from "./reflection-scheduler"
 import { isValidAt, toEntry } from "./parse-entry"
 import { expandQueryHyde, hybridRank, rankMemories } from "./retrieval"
@@ -610,6 +612,32 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
                 minNotesToTrigger: 5,
                 maxNotesPerRun: 20,
               }).catch((err) => log.warn("reflection failed", { error: String(err) }))
+            }
+          }
+          const cscope = await resolveScope().catch(() => null)
+          if (cscope) {
+            const vaultIdx = getVaultIndex(cscope.vaultRoot)
+            const count = vaultIdx.noteCount()
+            if (count >= 150) {
+              const lastBuild = vaultIdx.lastCommunityBuild()
+              const lastWrite = vaultIdx.lastMemoryWrite()
+              const tenMin = 10 * 60 * 1000
+              const shouldBuild =
+                !lastBuild || (Date.now() - lastBuild > tenMin && lastWrite != null && lastWrite > lastBuild)
+              if (shouldBuild) {
+                log.info("building communities on session.idle")
+                const vdocs = await loadAll(cscope).catch(() => null)
+                if (vdocs) {
+                  const all: MemoryDoc[] = []
+                  if (vdocs.systemShared) all.push(vdocs.systemShared)
+                  if (vdocs.repoShared) all.push(vdocs.repoShared)
+                  if (vdocs.branchShared) all.push(vdocs.branchShared)
+                  for (const n of vdocs.notes) all.push(n)
+                  const map = buildCommunities(all.map(toEntry))
+                  vaultIdx.upsertCommunities(map)
+                  log.info("communities built", { count: map.size })
+                }
+              }
             }
           }
         }
