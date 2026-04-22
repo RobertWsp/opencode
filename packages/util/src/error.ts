@@ -22,7 +22,15 @@ export abstract class NamedError extends Error {
         public readonly data: z.input<Data>,
         options?: ErrorOptions,
       ) {
-        super(name, options)
+        // Prefer `data.message` as the Error's message when available so
+        // `toString()` / UI renderers show the real cause instead of
+        // "APIError: APIError" (the framework used the class name as the
+        // Error message, which produced a useless double-class-name string).
+        const msg =
+          data && typeof data === "object" && "message" in (data as Record<string, unknown>)
+            ? String((data as Record<string, unknown>).message ?? name)
+            : name
+        super(msg, options)
         this.name = name
       }
 

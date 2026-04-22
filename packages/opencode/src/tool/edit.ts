@@ -148,6 +148,7 @@ export const EditTool = Tool.define("edit", {
     const normalizedFilePath = Filesystem.normalizePath(filePath)
     const issues = diagnostics[normalizedFilePath] ?? []
     const errors = issues.filter((item) => item.severity === 1)
+    const warnings = issues.filter((item) => item.severity === 2)
     if (errors.length > 0) {
       const limited = errors.slice(0, MAX_DIAGNOSTICS_PER_FILE)
       const suffix =
@@ -155,9 +156,34 @@ export const EditTool = Tool.define("edit", {
       output += `\n\nLSP errors detected in this file, please fix:\n<diagnostics file="${filePath}">\n${limited.map(LSP.Diagnostic.pretty).join("\n")}${suffix}\n</diagnostics>`
     }
 
+    // Structured diagnostics summary — exposes the error/warning counts and
+    // the first N issues in machine-readable form so plugin hooks
+    // (tool.execute.after) can consume programmatically without re-parsing
+    // the `<diagnostics>` pretty-print block above.
+    const diagnosticsSummary = {
+      file: filePath,
+      errorCount: errors.length,
+      warningCount: warnings.length,
+      errors: errors.slice(0, MAX_DIAGNOSTICS_PER_FILE).map((d) => ({
+        line: d.range?.start?.line ?? 0,
+        character: d.range?.start?.character ?? 0,
+        message: d.message ?? "",
+        source: d.source ?? "lsp",
+        code: typeof d.code === "string" || typeof d.code === "number" ? String(d.code) : undefined,
+      })),
+      warnings: warnings.slice(0, MAX_DIAGNOSTICS_PER_FILE).map((d) => ({
+        line: d.range?.start?.line ?? 0,
+        character: d.range?.start?.character ?? 0,
+        message: d.message ?? "",
+        source: d.source ?? "lsp",
+        code: typeof d.code === "string" || typeof d.code === "number" ? String(d.code) : undefined,
+      })),
+    }
+
     return {
       metadata: {
         diagnostics,
+        diagnosticsSummary,
         diff,
         filediff,
       },

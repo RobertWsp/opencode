@@ -35,12 +35,19 @@ export const MultiEditTool = Tool.define("multiedit", {
       )
       results.push(result)
     }
+    // Expose the final Edit's diagnosticsSummary at the top level so
+    // plugin hooks (tool.execute.after) can read it without walking the
+    // `results` array. Matches the shape of edit.ts / write.ts.
+    const lastResult = results.at(-1)!
+    const lastMetadata = (lastResult.metadata ?? {}) as Record<string, unknown>
+    const diagnosticsSummary = (lastMetadata as { diagnosticsSummary?: unknown }).diagnosticsSummary
     return {
       title: path.relative(Instance.worktree, params.filePath),
       metadata: {
         results: results.map((r) => r.metadata),
+        ...(diagnosticsSummary ? { diagnosticsSummary } : {}),
       },
-      output: results.at(-1)!.output,
+      output: lastResult.output,
     }
   },
 })

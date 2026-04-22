@@ -152,6 +152,19 @@ export async function selectCandidates(
 /**
  * Load every markdown under the scope's notes dir + shared files into
  * MemoryEntry form. Skips files that fail to read or parse.
+ *
+ * Includes a UNION-SEARCH step: when the scope transitioned (e.g. non-git
+ * → git, anchor-pinned across remote add), notes may still live under a
+ * sibling slug. We also read:
+ *
+ *   - `scope.naturalRepoSlug` — the "natural" (pre-anchor) slug. Covers
+ *     the grace period between first unanchored save and anchor write.
+ *   - `<repoSlug>/branches/_nogit/notes` — notes saved while the dir was
+ *     non-git, now visible from a git branch in the same repo.
+ *   - `<repoSlug>/branches/main|master/notes` — notes saved while in git,
+ *     now visible from a synthetic `_nogit` scope (after `.git` deletion).
+ *
+ * Disabled with `OBSIDIAN_MEMORY_DISABLE_UNION_SEARCH=1`.
  */
 export async function loadAllEntries(scope: Scope): Promise<MemoryEntry[]> {
   const files: string[] = [
@@ -159,16 +172,50 @@ export async function loadAllEntries(scope: Scope): Promise<MemoryEntry[]> {
     scope.repoSharedPath,
     scope.branchSharedPath,
   ]
-  try {
-    const entries = await fs.readdir(scope.notesDir)
-    for (const name of entries) {
-      if (name.endsWith(".md")) files.push(path.join(scope.notesDir, name))
+  const notesDirs = new Set<string>([scope.notesDir])
+
+  // Union search — add sibling directories that likely contain older notes.
+  if (process.env.OBSIDIAN_MEMORY_DISABLE_UNION_SEARCH !== "1") {
+    // (A) Natural repoSlug (pre-anchor) — includes its branch and _nogit.
+    if (scope.naturalRepoSlug && scope.naturalRepoSlug !== scope.repoSlug) {
+      const naturalRepoDir = path.join(scope.vaultRoot, "opencode", "repos", scope.naturalRepoSlug)
+      if (scope.naturalBranchSlug && scope.naturalBranchSlug !== scope.branchSlug) {
+        notesDirs.add(path.join(naturalRepoDir, "branches", scope.naturalBranchSlug, "notes"))
+      }
+      notesDirs.add(path.join(naturalRepoDir, "branches", "_nogit", "notes"))
+      notesDirs.add(path.join(naturalRepoDir, "branches", "main", "notes"))
+      notesDirs.add(path.join(naturalRepoDir, "branches", "master", "notes"))
     }
-  } catch {
-    // notes dir missing, that's fine
+
+    // (B) Cross-branch siblings within the SAME repoSlug. Covers dir that
+    // flipped from git → non-git (or vice-versa) without remote change.
+    const currentRepoDir = path.join(scope.vaultRoot, "opencode", "repos", scope.repoSlug, "branches")
+    if (scope.branchSlug !== "_nogit") notesDirs.add(path.join(currentRepoDir, "_nogit", "notes"))
+    if (scope.branchSlug !== "main") notesDirs.add(path.join(currentRepoDir, "main", "notes"))
+    if (scope.branchSlug !== "master") notesDirs.add(path.join(currentRepoDir, "master", "notes"))
   }
 
-  const docs = await Promise.all(files.map(loadDocSilent))
+  for (const dir of notesDirs) {
+    try {
+      const entries = await fs.readdir(dir)
+      for (const name of entries) {
+        if (name.endsWith(".md")) files.push(path.join(dir, name))
+      }
+    } catch {
+      // missing sibling dir — expected for most transitions
+    }
+  }
+
+  // Deduplicate — sibling sharing of a single note (shouldn't happen with
+  // mkdir-based writes, but guard is cheap) can cause double-loading.
+  const seen = new Set<string>()
+  const uniqueFiles = files.filter((f) => {
+    if (seen.has(f)) return false
+    seen.add(f)
+    return true
+  })
+
+  const docs = await Promise.all(uniqueFiles.map(loadDocSilent))
   const out: MemoryEntry[] = []
   for (const doc of docs) {
     if (doc) out.push(toEntry(doc))

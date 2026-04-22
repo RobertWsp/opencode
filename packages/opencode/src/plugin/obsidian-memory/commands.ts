@@ -7,6 +7,11 @@ import { writeNote } from "./vault"
 import { VaultGit } from "./vault-git"
 import { getVaultIndex } from "./vault-index"
 import type { MemoryEntry, Scope } from "./types"
+import { buildDataset } from "./eval/dataset-builder"
+import { runSuite } from "./eval/runner"
+import { aggregate } from "./eval/metrics"
+import { readBaseline, writeObsidianReport } from "./eval/report"
+import { EVAL_CONFIG } from "./eval/config"
 
 /**
  * Result of running a /memory subcommand. `text` is plain markdown that
@@ -367,4 +372,75 @@ export async function why(concept: string, scope: Scope): Promise<MemoryEntry[]>
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
+}
+
+export async function runEval(scope: Scope, args: string): Promise<CommandResult> {
+  const rebuild = /\brebuild\b/i.test(args)
+  const evalDir = path.join(scope.vaultRoot, "_eval")
+  const datasetPath = path.join(evalDir, "dataset.jsonl")
+  const resultsPath = path.join(evalDir, `results-${new Date().toISOString().slice(0, 10)}.jsonl`)
+
+  let datasetExists = false
+  try {
+    await fs.stat(datasetPath)
+    datasetExists = true
+  } catch {
+    datasetExists = false
+  }
+
+  const lines: string[] = []
+  lines.push(`## Memory eval — ${scope.repoSlug}::${scope.branchSlug}`)
+  lines.push("")
+
+  if (rebuild || !datasetExists) {
+    const buildStart = Date.now()
+    const built = await buildDataset(scope, datasetPath, {
+      maxQueriesPerNote: EVAL_CONFIG.maxQueriesPerNote,
+      maxAbstention: EVAL_CONFIG.maxAbstentionQueries,
+      concurrency: EVAL_CONFIG.concurrency,
+    })
+    lines.push(`**Built dataset**: ${built.total} queries in ${Date.now() - buildStart}ms`)
+    lines.push(`_by category_: ${JSON.stringify(built.byCategory)}`)
+  } else {
+    lines.push(`**Reusing dataset** at \`${path.relative(scope.vaultRoot, datasetPath)}\``)
+    lines.push(`_(pass "rebuild" arg to regenerate)_`)
+  }
+  lines.push("")
+
+  const runStart = Date.now()
+  const results = await runSuite(scope, datasetPath, resultsPath, {
+    concurrency: EVAL_CONFIG.concurrency,
+    topK: EVAL_CONFIG.topK,
+  })
+  lines.push(`**Ran** ${results.length} queries in ${Date.now() - runStart}ms`)
+
+  const report = aggregate(results)
+  const baseline = await readBaseline(scope.vaultRoot)
+  const reportPath = await writeObsidianReport(scope.vaultRoot, report, baseline, {
+    datasetPath: path.relative(scope.vaultRoot, datasetPath),
+    resultsPath: path.relative(scope.vaultRoot, resultsPath),
+    scope: `${scope.repoSlug}::${scope.branchSlug}`,
+    judgeModel: EVAL_CONFIG.judgeModel,
+  })
+
+  lines.push("")
+  lines.push(`### Overall`)
+  lines.push(
+    `- P@1 = **${report.overall.p1.toFixed(2)}** · P@5 = **${report.overall.p5.toFixed(2)}** · MRR = **${report.overall.mrr.toFixed(3)}**`,
+  )
+  lines.push(`- Judge accuracy = **${(report.overall.accuracy * 100).toFixed(1)}%**`)
+  lines.push(
+    `- Latency p50 = ${report.overall.retrievalP50}ms retrieval / ${report.overall.judgeP50}ms judge`,
+  )
+  lines.push("")
+  lines.push(`### By category`)
+  for (const [cat, m] of Object.entries(report.byCategory)) {
+    lines.push(
+      `- **${cat}** (${m.count}): P@1=${m.p1.toFixed(2)} P@5=${m.p5.toFixed(2)} acc=${(m.accuracy * 100).toFixed(0)}%`,
+    )
+  }
+  lines.push("")
+  lines.push(`Report: \`${path.relative(scope.vaultRoot, reportPath)}\` (also at \`_eval/LATEST.md\`)`)
+
+  return { ok: true, text: lines.join("\n") }
 }

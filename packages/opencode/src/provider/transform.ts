@@ -172,12 +172,63 @@ export namespace ProviderTransform {
   }
 
   function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
-    const system = msgs.filter((msg) => msg.role === "system").slice(0, 2)
-    const final = msgs.filter((msg) => msg.role !== "system").slice(-2)
+    // Anthropic allows up to 4 ephemeral breakpoints per request. The cache
+    // prefix is cumulative: every breakpoint caches everything from the
+    // start of the prompt up to (and including) that breakpoint. So the
+    // strategy is to place breakpoints at stable prefix boundaries so the
+    // longest possible prefix can be reused across turns.
+    //
+    // Layout for Claude (4 breakpoints max):
+    //   - system[0]:      environment + tools (very stable, cached long-term)
+    //   - system[last]:   harness + agent prompt (stable per-session)
+    //   - msgs[-4]:       turn boundary (cache of recent history)
+    //   - msgs[-1]:       last message (per-turn cache write — next turn reads)
+    //
+    // For non-Anthropic providers (openrouter, bedrock, etc.) we keep the
+    // conservative 2-system + 2-final layout since their cache behavior
+    // differs and the gain of 4 breakpoints is unverified there.
+    const isAnthropic =
+      model.providerID === "anthropic" ||
+      model.api.npm === "@ai-sdk/anthropic" ||
+      model.api.npm === "@ai-sdk/google-vertex/anthropic"
+
+    const systemMsgs = msgs.filter((msg) => msg.role === "system")
+    const nonSystem = msgs.filter((msg) => msg.role !== "system")
+
+    const breakpoints: ModelMessage[] = []
+    if (isAnthropic) {
+      // Breakpoint 1: first system message (environment header)
+      if (systemMsgs[0]) breakpoints.push(systemMsgs[0])
+      // Breakpoint 2: last system message (harness + agent prompt)
+      const lastSystem = systemMsgs[systemMsgs.length - 1]
+      if (lastSystem && lastSystem !== systemMsgs[0]) breakpoints.push(lastSystem)
+      // Breakpoint 3: history anchor (~4th from end) — caches the
+      // pre-current-turn history prefix
+      const historyAnchor = nonSystem[nonSystem.length - 4]
+      if (historyAnchor) breakpoints.push(historyAnchor)
+      // Breakpoint 4: final message — becomes the prefix for NEXT turn
+      const last = nonSystem[nonSystem.length - 1]
+      if (last) breakpoints.push(last)
+    } else {
+      // Conservative default for non-Anthropic: first 2 system + last 2
+      breakpoints.push(...systemMsgs.slice(0, 2))
+      breakpoints.push(...nonSystem.slice(-2))
+    }
+
+    // TTL selection: 1h when the session has idle time or heavy system
+    // prompts; 5m (API default) otherwise. The cache write cost is 2x for
+    // 1h vs 1.25x for 5m, but 1h pays off after ~2 turns in idle sessions.
+    // When 5m is chosen we omit the `ttl` field entirely (5m is the API
+    // default) — this keeps the payload byte-identical to the pre-patch
+    // behavior and avoids surprising downstream schema validators.
+    const use1h = shouldUse1hTtl(msgs, isAnthropic)
+    const anthropicCacheControl = use1h
+      ? ({ type: "ephemeral", ttl: "1h" } as const)
+      : ({ type: "ephemeral" } as const)
 
     const providerOptions = {
       anthropic: {
-        cacheControl: { type: "ephemeral" },
+        cacheControl: anthropicCacheControl,
       },
       openrouter: {
         cacheControl: { type: "ephemeral" },
@@ -193,7 +244,7 @@ export namespace ProviderTransform {
       },
     }
 
-    for (const msg of unique([...system, ...final])) {
+    for (const msg of unique(breakpoints)) {
       const useMessageLevelOptions = model.providerID === "anthropic" || model.providerID.includes("bedrock")
       const shouldUseContentOptions = !useMessageLevelOptions && Array.isArray(msg.content) && msg.content.length > 0
 
@@ -209,6 +260,27 @@ export namespace ProviderTransform {
     }
 
     return msgs
+  }
+
+  /**
+   * Choose cache TTL. 1h is worth the 2x write cost when:
+   *   - System prompts are large (>~4k tokens of stable preamble). The
+   *     break-even is ~4 reads at 0.1x vs 1 write at 2x, so any session
+   *     with 2+ turns that span >5 minutes benefits.
+   *   - The session has several assistant/tool messages already (heuristic
+   *     for "ongoing work" where the user may step away between turns).
+   *
+   * Safe default is 5m for Anthropic (matches API default). Non-Anthropic
+   * paths ignore TTL (their cacheControl shape lacks it in our schema).
+   */
+  function shouldUse1hTtl(msgs: ModelMessage[], isAnthropic: boolean): boolean {
+    if (!isAnthropic) return false
+    if (Flag.OPENCODE_CACHE_TTL_1H_DISABLED) return false
+    const nonSystem = msgs.filter((m) => m.role !== "system")
+    // 4+ non-system messages ≈ 2+ turns of real conversation.
+    // At that point, the user is likely coming back across pauses >5min
+    // and a 1h TTL pays off on the next turn.
+    return nonSystem.length >= 4
   }
 
   function unsupportedParts(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {

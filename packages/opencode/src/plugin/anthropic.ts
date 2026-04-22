@@ -227,7 +227,86 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                     )
                   }
 
+                  // Context editing: auto-clear old tool results when input token budget
+                  // crosses a threshold. Prevents context bloat in long agentic sessions
+                  // without losing cache efficiency — the cleared section is replaced with
+                  // a placeholder so only tokens AFTER the cleared region get re-cached.
+                  // Beta header "context-management-2025-06-27" is already set below.
+                  // Disable by setting OPENCODE_CONTEXT_EDITING_DISABLED=1.
+                  if (!process.env.OPENCODE_CONTEXT_EDITING_DISABLED) {
+                    const modelIdLower = String(modelId).toLowerCase()
+                    // Opus 4.7 and Sonnet 4.6/4.7 support the clear_tool_uses strategy.
+                    // Haiku 4.5 has a 200k window and rarely needs it.
+                    const supportsEditing =
+                      modelIdLower.includes("opus") || modelIdLower.includes("sonnet")
+                    if (supportsEditing) {
+                      parsed.context_management = parsed.context_management ?? {
+                        edits: [
+                          {
+                            type: "clear_tool_uses_20250919",
+                            // Trigger when total input tokens exceed this threshold.
+                            // For 200k context: trigger at 140k (70%) leaves 60k headroom.
+                            // For 1M context: trigger at 700k (70%) — override via env below.
+                            trigger: {
+                              type: "input_tokens",
+                              value: Number(
+                                process.env.OPENCODE_CONTEXT_EDIT_TRIGGER_TOKENS ?? 140000,
+                              ),
+                            },
+                            // Keep the most recent N tool results. Older ones get cleared
+                            // with a placeholder telling Claude "tool result omitted".
+                            keep: {
+                              type: "tool_uses",
+                              value: Number(process.env.OPENCODE_CONTEXT_EDIT_KEEP ?? 5),
+                            },
+                            // Never clear tools we explicitly protect (edit, write) —
+                            // their results matter for following turns.
+                            exclude_tools: ["mcp_write", "mcp_edit", "mcp_multiedit"],
+                            // Require at least this many tokens to be cleared — avoids
+                            // busywork when there's nothing substantive to free.
+                            clear_at_least: {
+                              type: "input_tokens",
+                              value: 8000,
+                            },
+                          },
+                        ],
+                      }
+                    }
+                  }
+
                   body = JSON.stringify(parsed)
+
+                  // Optional payload capture for token-budget analysis.
+                  // Set OPENCODE_CAPTURE_PAYLOAD=/path/to/dir to dump each
+                  // request body (NDJSON-style per file). Disabled by default.
+                  const captureDir = process.env.OPENCODE_CAPTURE_PAYLOAD
+                  if (captureDir) {
+                    try {
+                      const fs = await import("fs")
+                      const path = await import("path")
+                      fs.mkdirSync(captureDir, { recursive: true })
+                      const fname = `${Date.now()}_${modelId.replace(/[^a-z0-9]/gi, "_")}.json`
+                      const summary = {
+                        capturedAt: new Date().toISOString(),
+                        model: modelId,
+                        url: typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+                        systemBlocks: (parsed.system ?? []).length,
+                        systemChars: JSON.stringify(parsed.system ?? []).length,
+                        toolCount: (parsed.tools ?? []).length,
+                        toolsChars: JSON.stringify(parsed.tools ?? []).length,
+                        messageCount: (parsed.messages ?? []).length,
+                        messagesChars: JSON.stringify(parsed.messages ?? []).length,
+                        contextManagement: !!parsed.context_management,
+                        hasThinking: !!parsed.thinking,
+                        maxTokens: parsed.max_tokens,
+                        stream: !!parsed.stream,
+                        raw: parsed,
+                      }
+                      fs.writeFileSync(path.join(captureDir, fname), JSON.stringify(summary, null, 2))
+                    } catch {
+                      // best-effort — never break the request on capture failure
+                    }
+                  }
                 } catch {
                   // ignore parse errors
                 }

@@ -1552,6 +1552,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "skill"}>
           <Skill {...toolprops} />
         </Match>
+        <Match when={props.part.tool?.startsWith("obsidian-memory_")}>
+          <Memory {...toolprops} />
+        </Match>
         <Match when={true}>
           <GenericTool {...toolprops} />
         </Match>
@@ -1603,6 +1606,62 @@ function GenericTool(props: ToolProps<any>) {
         </box>
       </BlockTool>
     </Show>
+  )
+}
+
+function Memory(props: ToolProps<any>) {
+  const { theme } = useTheme()
+  const isRunning = createMemo(() => props.part.state.status === "running")
+  const action = createMemo(() => {
+    const t = props.tool.replace(/^obsidian-memory_memory[._]?/, "").replace(/^obsidian-memory_/, "")
+    return t || "memory"
+  })
+  const meta = createMemo(() => {
+    const a = action()
+    const input = (props.input ?? {}) as Record<string, unknown>
+    if (a === "search") {
+      const q = typeof input.query === "string" ? input.query : ""
+      return { icon: "◈", label: "Memory search", detail: q ? `"${q.slice(0, 70)}"` : "" }
+    }
+    if (a === "list") {
+      const kind = typeof input.kind === "string" ? ` kind=${input.kind}` : ""
+      const limit = typeof input.limit === "number" ? ` limit=${input.limit}` : ""
+      return { icon: "☰", label: "Memory list", detail: `${kind}${limit}`.trim() }
+    }
+    if (a === "get") {
+      const paths = Array.isArray(input.paths) ? (input.paths as string[]) : []
+      return { icon: "⟶", label: "Memory read", detail: `${paths.length} note${paths.length === 1 ? "" : "s"}` }
+    }
+    if (a === "save") {
+      const title = typeof input.title === "string" ? input.title : ""
+      return { icon: "✚", label: "Memory save", detail: title ? `"${title.slice(0, 70)}"` : "" }
+    }
+    if (a === "update") {
+      const filepath = typeof input.path === "string" ? input.path.split("/").pop() ?? "" : ""
+      return { icon: "✎", label: "Memory update", detail: filepath }
+    }
+    if (a === "suggested") return { icon: "⚑", label: "Memory pending", detail: "" }
+    if (a === "approve") return { icon: "✓", label: "Memory approve", detail: String(input.filename ?? "") }
+    if (a === "reject") return { icon: "✗", label: "Memory reject", detail: String(input.filename ?? "") }
+    if (a === "stats") return { icon: "▤", label: "Memory stats", detail: "" }
+    if (a === "health") return { icon: "♥", label: "Memory health", detail: "" }
+    if (a === "eval") return { icon: "◉", label: "Memory eval", detail: "retrieval quality" }
+    return { icon: "◆", label: `Memory ${a}`, detail: "" }
+  })
+  return (
+    <InlineTool
+      icon={meta().icon}
+      iconColor={theme.accent}
+      pending={`${meta().label}...`}
+      complete={true}
+      spinner={isRunning()}
+      part={props.part}
+    >
+      <span style={{ fg: theme.accent, bold: true }}>{meta().label}</span>{" "}
+      <Show when={meta().detail}>
+        <span style={{ fg: theme.textMuted }}>{meta().detail}</span>
+      </Show>
+    </InlineTool>
   )
 }
 

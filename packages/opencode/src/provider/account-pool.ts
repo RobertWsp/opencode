@@ -19,6 +19,8 @@ export namespace AccountPool {
     index: number
     /** Human-readable label for the account (e.g., "Account 1", "Backup Key") */
     label: string
+    /** Email address of the Anthropic account when known (from oauthAccount.emailAddress) */
+    email?: string
     /** Provider identifier (e.g., "anthropic", "openai") */
     providerID: string
     /** xxHash32 of the raw API key — used for deduplication without storing the key */
@@ -50,6 +52,14 @@ export namespace AccountPool {
     cooldownUntil?: number
     /** Number of times this account has been manually switched to */
     switchCount: number
+    /** Rolling 5-hour window — timestamps of the most recent requests */
+    windowRecent: number[]
+    /** Rolling 7-day window — timestamps of the most recent requests (sampled hourly for memory) */
+    windowDaily: number[]
+    /** Reset timestamp for Claude Max 5-hour session limit, parsed from error responses */
+    session5hResetAt?: number
+    /** Reset timestamp for Claude Max weekly limit, parsed from error responses */
+    weeklyResetAt?: number
   }
 
   /**
@@ -167,6 +177,23 @@ export namespace AccountPool {
      * @param index - Zero-based index of the account to make active
      */
     setActive(index: number): void
+
+    /**
+     * Mark an account as having hit a session limit (5-hour or weekly Max quota).
+     * Stores the reset timestamp so the UI can show when the account recovers.
+     * @param index - Zero-based index of the account
+     * @param kind - Which window hit its limit
+     * @param resetAt - Unix timestamp (ms) when the limit resets
+     */
+    markSessionLimit(index: number, kind: "5h" | "weekly", resetAt: number): void
+
+    /**
+     * Update the email shown in the UI for a given account. Called after
+     * the background Anthropic profile lookup resolves.
+     * @param index - Zero-based index of the account
+     * @param email - Email address of the Anthropic account
+     */
+    setEmail(index: number, email: string): void
   }
 
   /**
@@ -217,11 +244,16 @@ export namespace AccountPool {
           z.object({
             index: z.number(),
             label: z.string(),
+            email: z.string().optional(),
             status: z.enum(["active", "cooldown", "disabled"]),
             requestCount: z.number(),
             tokenCount: z.number(),
             switchCount: z.number(),
             cooldownUntil: z.number().optional(),
+            session5hCount: z.number(),
+            session5hResetAt: z.number().optional(),
+            weeklyCount: z.number(),
+            weeklyResetAt: z.number().optional(),
           }),
         ),
       }),
@@ -233,7 +265,13 @@ export namespace AccountPool {
 
 const log = Log.create({ service: "account-pool" })
 
-type AccountInput = { key: string; label?: string; providerID: string; authKey?: string }
+type AccountInput = {
+  key: string
+  label?: string
+  email?: string
+  providerID: string
+  authKey?: string
+}
 
 // regex patterns signaling permanent account exhaustion (quota/billing), not temporary rate limit
 const EXHAUSTION_PATTERNS = [
@@ -252,6 +290,29 @@ const EXHAUSTION_PATTERNS = [
 export const EXHAUSTION_RETRY_AFTER_MS = 300_000
 export const COOLDOWN_MAX_WAIT_MS = 120_000
 
+// Rolling windows for session-limit UX:
+// Claude Max uses a 5-hour session quota and a 7-day weekly quota.
+const WINDOW_5H_MS = 5 * 60 * 60 * 1000
+const WINDOW_7D_MS = 7 * 24 * 60 * 60 * 1000
+// Keep windowDaily sampled (≤1 entry per minute) so a burst of 10k requests
+// doesn't bloat state.
+const WINDOW_DAILY_MIN_INTERVAL_MS = 60_000
+
+function pruneWindow(arr: number[], now: number, maxAgeMs: number): void {
+  const cutoff = now - maxAgeMs
+  while (arr.length > 0 && arr[0] < cutoff) arr.shift()
+}
+
+function countInWindow(arr: number[], now: number, maxAgeMs: number): number {
+  const cutoff = now - maxAgeMs
+  let n = 0
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] < cutoff) break
+    n++
+  }
+  return n
+}
+
 export function isAccountExhausted(retryAfterMs: number, body?: string): boolean {
   if (retryAfterMs >= EXHAUSTION_RETRY_AFTER_MS) return true
   if (body && EXHAUSTION_PATTERNS.some((p) => p.test(body))) return true
@@ -269,18 +330,28 @@ function tryPublish<D extends BusEvent.Definition>(def: D, props: Parameters<typ
 function emitStatus(pool_states: AccountPool.State[], active: number) {
   if (!pool_states.length) return
   const providerID = pool_states[0].info.providerID
+  const now = Date.now()
   tryPublish(AccountPool.Event.Status, {
     providerID,
     activeIndex: active,
-    accounts: pool_states.map((s) => ({
-      index: s.info.index,
-      label: s.info.label,
-      status: s.status,
-      requestCount: s.requestCount,
-      tokenCount: s.tokenCount,
-      switchCount: s.switchCount,
-      cooldownUntil: s.cooldownUntil,
-    })),
+    accounts: pool_states.map((s) => {
+      pruneWindow(s.windowRecent, now, WINDOW_5H_MS)
+      pruneWindow(s.windowDaily, now, WINDOW_7D_MS)
+      return {
+        index: s.info.index,
+        label: s.info.label,
+        email: s.info.email,
+        status: s.status,
+        requestCount: s.requestCount,
+        tokenCount: s.tokenCount,
+        switchCount: s.switchCount,
+        cooldownUntil: s.cooldownUntil,
+        session5hCount: s.windowRecent.length,
+        session5hResetAt: s.session5hResetAt,
+        weeklyCount: s.windowDaily.length,
+        weeklyResetAt: s.weeklyResetAt,
+      }
+    }),
   })
 }
 
@@ -324,6 +395,7 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
     info: {
       index: i,
       label: a.label ?? `Account #${i + 1}`,
+      email: a.email,
       providerID: a.providerID,
       keyHash: Bun.hash.xxHash32(a.key),
     },
@@ -333,6 +405,10 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
     lastUsedAt: 0,
     cooldownUntil: undefined,
     switchCount: 0,
+    windowRecent: [],
+    windowDaily: [],
+    session5hResetAt: undefined,
+    weeklyResetAt: undefined,
   }))
 
   let activeIndex = 0
@@ -437,9 +513,39 @@ export function createPool(accounts: AccountInput[] | string): AccountPool.Pool 
 
     increment(index, tokens) {
       const s = pool_states[index]
+      const now = Date.now()
       s.requestCount++
       s.tokenCount += tokens ?? 0
-      s.lastUsedAt = Date.now()
+      s.lastUsedAt = now
+      s.windowRecent.push(now)
+      pruneWindow(s.windowRecent, now, WINDOW_5H_MS)
+      const last = s.windowDaily[s.windowDaily.length - 1]
+      if (last === undefined || now - last >= WINDOW_DAILY_MIN_INTERVAL_MS) {
+        s.windowDaily.push(now)
+      }
+      pruneWindow(s.windowDaily, now, WINDOW_7D_MS)
+      // Opportunistic: if we passed the reset point, clear it.
+      if (s.session5hResetAt !== undefined && s.session5hResetAt <= now) {
+        s.session5hResetAt = undefined
+      }
+      if (s.weeklyResetAt !== undefined && s.weeklyResetAt <= now) {
+        s.weeklyResetAt = undefined
+      }
+    },
+
+    markSessionLimit(index, kind, resetAt) {
+      const s = pool_states[index]
+      if (!s) return
+      if (kind === "5h") s.session5hResetAt = resetAt
+      else s.weeklyResetAt = resetAt
+      emitStatus(pool_states, activeIndex)
+    },
+
+    setEmail(index, email) {
+      const s = pool_states[index]
+      if (!s) return
+      s.info.email = email
+      emitStatus(pool_states, activeIndex)
     },
 
     states() {

@@ -200,7 +200,14 @@ export namespace LLM {
         model: input.model,
         provider,
         message: input.user,
-      },
+        // Propagate the caller's abort signal so plugins that block (e.g.
+        // Meridian's waitForHealthyProfile — can sleep up to MERIDIAN_WAIT_MAX_MS
+        // = 7d) can be interrupted by Ctrl+C. Without this, pressing Ctrl+C
+        // during a wait leaves the process blocked until the wait's own
+        // timeout, not the user's. Keep both names for plugin-side flexibility.
+        signal: input.abort,
+        abortSignal: input.abort,
+      } as any,
       {
         headers: {},
       },
@@ -229,6 +236,57 @@ export namespace LLM {
         inputSchema: jsonSchema({ type: "object", properties: {} }),
         execute: async () => ({ output: "", title: "", metadata: {} }),
       })
+    }
+
+    // Optional payload capture for token-budget analysis.
+    // Set OPENCODE_CAPTURE_PAYLOAD=/path/to/dir to dump the pre-stream
+    // params snapshot (system/tools/messages). Disabled by default.
+    // NB: this runs BEFORE the Meridian/Anthropic fetch interceptors, so it
+    // captures what OpenCode produces regardless of routing path.
+    const captureDir = process.env.OPENCODE_CAPTURE_PAYLOAD
+    if (captureDir) {
+      try {
+        const fs = await import("fs")
+        const path = await import("path")
+        fs.mkdirSync(captureDir, { recursive: true })
+        const stamp = Date.now()
+        const summary = {
+          capturedAt: new Date(stamp).toISOString(),
+          sessionID: input.sessionID,
+          agent: input.agent?.name,
+          modelID: input.model.id,
+          providerID: input.model.providerID,
+          systemMessages: system.length,
+          systemChars: system.map((s) => s.length),
+          systemTotalChars: system.reduce((a, b) => a + b.length, 0),
+          toolCount: Object.keys(tools).length,
+          toolNames: Object.keys(tools),
+          messageCount: input.messages.length,
+          messagesJson: JSON.stringify(input.messages).length,
+          maxOutputTokens,
+          options: params.options,
+        }
+        fs.writeFileSync(
+          path.join(captureDir, `${stamp}_${input.model.id.replace(/[^a-z0-9]/gi, "_")}.json`),
+          JSON.stringify(
+            {
+              summary,
+              system,
+              tools: Object.fromEntries(
+                Object.entries(tools).map(([k, v]: any) => [
+                  k,
+                  { description: v.description, inputSchema: v.inputSchema?.jsonSchema ?? v.inputSchema },
+                ]),
+              ),
+              messages: input.messages,
+            },
+            null,
+            2,
+          ),
+        )
+      } catch {
+        // best-effort — never break the request on capture failure
+      }
     }
 
     return streamText({
@@ -320,11 +378,27 @@ export namespace LLM {
   }
 
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
+    const before = Object.keys(input.tools)
     const disabled = PermissionNext.disabled(Object.keys(input.tools), input.agent.permission)
+    const rmUserFalse: string[] = []
+    const rmDisabled: string[] = []
     for (const tool of Object.keys(input.tools)) {
-      if (input.user.tools?.[tool] === false || disabled.has(tool)) {
+      if (input.user.tools?.[tool] === false) {
+        rmUserFalse.push(tool)
+        delete input.tools[tool]
+      } else if (disabled.has(tool)) {
+        rmDisabled.push(tool)
         delete input.tools[tool]
       }
+    }
+    if (process.env.OPENCODE_DEBUG_SUBAGENT_TOOLS === "1") {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[llm.resolveTools] agent=${input.agent.name} before=${before.length} after=${Object.keys(input.tools).length} ` +
+          `rmUserFalse=${JSON.stringify(rmUserFalse)} rmDisabled=${JSON.stringify(rmDisabled)} ` +
+          `userToolsKeys=${JSON.stringify(input.user.tools ? Object.keys(input.user.tools) : null)} ` +
+          `agentPerm=${JSON.stringify(input.agent.permission.map((r) => r.permission + ":" + r.action))}`,
+      )
     }
     return input.tools
   }

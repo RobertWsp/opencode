@@ -1257,6 +1257,73 @@ export namespace Config {
               "Idle timeout in milliseconds before a lazy MCP server is suspended when inactive (default: 300000 = 5 minutes). Only applies when lazy_mcp: true",
             ),
           lazy_mcp: z.boolean().optional().describe("Enable lazy loading of MCP servers on-demand (default: false)"),
+          stream_idle_timeout_ms: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              "Abort and retry the LLM stream if no event arrives within this window. Guards against hung connections (provider keeps TCP open without sending data). The watchdog is automatically disarmed during tool execution and active reasoning blocks, so this only trips on truly dead streams outside those windows. Default: 300000 (5 min).",
+            ),
+          caveman: z
+            .object({
+              enabled: z
+                .boolean()
+                .optional()
+                .describe("Enable caveman-speak terse output mode to save output tokens"),
+              level: z
+                .enum(["lite", "full", "ultra"])
+                .optional()
+                .describe("Compression intensity. lite=drop filler, full=fragments, ultra=abbrev+arrows"),
+              intents: z
+                .array(
+                  z.enum([
+                    "research",
+                    "implementation",
+                    "investigation",
+                    "evaluation",
+                    "fix",
+                    "documentation",
+                    "conversation",
+                  ]),
+                )
+                .optional()
+                .describe(
+                  "Task intents that activate caveman. Default: research/investigation/evaluation/implementation/fix (excludes documentation — output IS the artifact — and conversation — trivial).",
+                ),
+              minMessageLength: z
+                .number()
+                .int()
+                .nonnegative()
+                .optional()
+                .describe("Skip caveman if last user message shorter than this (default: 0)"),
+              classifier: z
+                .enum(["regex", "haiku"])
+                .optional()
+                .describe(
+                  "Intent classifier backend. 'haiku' uses a small LLM for robust multi-language classification; 'regex' is synchronous fallback. Default: haiku.",
+                ),
+              classifierTimeoutMs: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe("Timeout for the Haiku classifier before falling back to regex (default: 3000)"),
+              agents: z
+                .record(
+                  z.string(),
+                  z.object({
+                    enabled: z.boolean().optional(),
+                    level: z.enum(["lite", "full", "ultra"]).optional(),
+                  }),
+                )
+                .optional()
+                .describe(
+                  "Per-agent overrides. prometheus/momus/metis are disabled by default (their output IS prose artifact — plan/review). Example: { prometheus: { enabled: false }, explore: { level: 'ultra' } }",
+                ),
+            })
+            .optional()
+            .describe("Caveman terse-output experimental mode — saves output tokens on selected task types"),
         })
         .optional(),
       worktree: z

@@ -4,3 +4,6 @@ gen
 app.log
 src/provider/models-snapshot.ts
 dist-v2/
+
+# Obsidian-memory plugin runtime state — per-repo, not source
+.obsidian-memory-scope.json

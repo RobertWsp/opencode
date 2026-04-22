@@ -83,6 +83,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 );
 `
 
+const cache = new Map<string, VaultIndex>()
+
+export function getVaultIndex(vaultRoot: string): VaultIndex {
+  let idx = cache.get(vaultRoot)
+  if (idx) return idx
+  idx = new VaultIndex(vaultRoot)
+  idx.open()
+  cache.set(vaultRoot, idx)
+  return idx
+}
+
+export function closeAllVaultIndexes(): void {
+  for (const idx of cache.values()) idx.close()
+  cache.clear()
+}
+
 export class VaultIndex {
   private db: BunDatabase | null = null
   private dbPath: string
@@ -149,6 +165,27 @@ export class VaultIndex {
     const db = this.db!
     db.query(`DELETE FROM memories WHERE path = ?`).run(filepath)
     db.query(`DELETE FROM memories_fts WHERE path = ?`).run(filepath)
+  }
+
+  findBacklinks(targetPath: string, limit = 20): string[] {
+    this.open()
+    const db = this.db!
+    const slug = targetPath.split("/").pop()?.replace(/\.md$/, "") ?? ""
+    const target = db.query(`SELECT title FROM memories WHERE path = ?`).get(targetPath) as
+      | { title: string }
+      | undefined
+    const title = target?.title ?? ""
+    if (!slug && !title) return []
+    const patterns: string[] = []
+    if (slug) patterns.push(`%"${slug}"%`)
+    if (title && title !== slug) patterns.push(`%"${title}"%`)
+    const where = patterns.map(() => "links LIKE ?").join(" OR ")
+    const rows = db
+      .query(
+        `SELECT path FROM memories WHERE path != ? AND (${where}) AND (valid_until IS NULL OR valid_until = '' OR valid_until > datetime('now')) LIMIT ?`,
+      )
+      .all(targetPath, ...patterns, limit) as Array<{ path: string }>
+    return rows.map((r) => r.path)
   }
 
   /**
@@ -404,19 +441,6 @@ export class VaultIndex {
     this.upsert(doc)
     return "upserted"
   }
-}
-
-// ─── singleton cache ──────────────────────────────────────────────
-
-const indexCache = new Map<string, VaultIndex>()
-
-export function getVaultIndex(root: string): VaultIndex {
-  let idx = indexCache.get(root)
-  if (!idx) {
-    idx = new VaultIndex(root)
-    indexCache.set(root, idx)
-  }
-  return idx
 }
 
 // ─── helpers ─────────────────────────────────────────────────────

@@ -514,3 +514,57 @@ describe("active", () => {
     expect(active.index).toBe(next!.index)
   })
 })
+
+describe("email + session windows", () => {
+  it("exposes email via info.email", () => {
+    const pool = createPool([{ ...acct1, email: "user@example.com" }])
+    expect(pool.states()[0].info.email).toBe("user@example.com")
+  })
+
+  it("setEmail updates info.email and emits status", () => {
+    const pool = createPool([acct1])
+    expect(pool.states()[0].info.email).toBeUndefined()
+    pool.setEmail(0, "hey@example.com")
+    expect(pool.states()[0].info.email).toBe("hey@example.com")
+  })
+
+  it("increment() records a timestamp in windowRecent", () => {
+    const pool = createPool([acct1])
+    pool.increment(0, 100)
+    const s = pool.states()[0]
+    expect(s.windowRecent.length).toBe(1)
+    expect(s.windowRecent[0]).toBeGreaterThan(0)
+  })
+
+  it("windowDaily samples at most one entry per minute", () => {
+    const pool = createPool([acct1])
+    pool.increment(0)
+    pool.increment(0)
+    pool.increment(0)
+    // 3 fast increments should coalesce to 1 daily window entry
+    expect(pool.states()[0].windowDaily.length).toBe(1)
+  })
+
+  it("markSessionLimit stores resetAt for 5h", () => {
+    const pool = createPool([acct1])
+    const resetAt = Date.now() + 3_600_000
+    pool.markSessionLimit(0, "5h", resetAt)
+    expect(pool.states()[0].session5hResetAt).toBe(resetAt)
+    expect(pool.states()[0].weeklyResetAt).toBeUndefined()
+  })
+
+  it("markSessionLimit stores resetAt for weekly", () => {
+    const pool = createPool([acct1])
+    const resetAt = Date.now() + 7 * 24 * 3_600_000
+    pool.markSessionLimit(0, "weekly", resetAt)
+    expect(pool.states()[0].weeklyResetAt).toBe(resetAt)
+    expect(pool.states()[0].session5hResetAt).toBeUndefined()
+  })
+
+  it("increment() clears expired session5h resetAt", () => {
+    const pool = createPool([acct1])
+    pool.markSessionLimit(0, "5h", Date.now() - 1000)
+    pool.increment(0)
+    expect(pool.states()[0].session5hResetAt).toBeUndefined()
+  })
+})

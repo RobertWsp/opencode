@@ -46,6 +46,7 @@ import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
 import { Installation } from "../installation"
 import { AccountPool, createPool } from "./account-pool"
+import { resolveEmail as resolveAnthropicEmail } from "./anthropic-profile"
 import {
   loadStats,
   debouncedSave,
@@ -1083,6 +1084,8 @@ export namespace Provider {
                   : ""
           if (entry.info.type === "oauth") oauth++
           if (entry.info.type === "api") api++
+          const email =
+            entry.info.type === "oauth" && entry.info.email ? entry.info.email : undefined
           const label =
             entry.info.type === "oauth" && entry.info.accountId
               ? entry.info.accountId
@@ -1093,9 +1096,28 @@ export namespace Provider {
                 : entry.info.type === "api"
                   ? `API Key #${api}`
                   : `Account #${oauth + api}`
-          return { key, label, providerID, authKey: entry.key }
+          return { key, label, email, providerID, authKey: entry.key }
         })
-        pools.set(providerID, createPool(pool))
+        const created = createPool(pool)
+        pools.set(providerID, created)
+
+        // For Anthropic OAuth entries without a cached email, kick off a
+        // best-effort resolve. Local .claude.json match is synchronous-
+        // fast (no network); API fetch is the fallback. Non-blocking:
+        // UI updates via the account.status event when each resolves.
+        if (providerID === "anthropic") {
+          entries.forEach((entry, idx) => {
+            if (entry.info.type !== "oauth") return
+            if (entry.info.email) return
+            resolveAnthropicEmail(entry.key, entry.info.access, entry.info.refresh)
+              .then((email) => {
+                if (email) created.setEmail(idx, email)
+              })
+              .catch(() => {
+                /* best-effort — label falls back to "Claude Pro/Max #N" */
+              })
+          })
+        }
         continue
       }
       // Legacy: config.provider[id].options.accounts (raw API keys in opencode.json)
@@ -1133,6 +1155,31 @@ export namespace Provider {
       }
       const saved = loadActiveIndex(providerID)
       if (saved !== undefined && saved < states.length) pool.setActive(saved)
+    }
+
+    // Expose pool operations globally so cooperating plugins
+    // (oh-my-opencode runtime-fallback) can forward session-limit reset
+    // info from error messages into the pool — the sidebar then shows
+    // "resets in 4h" with the real reset time instead of a generic 5-min
+    // cooldown.
+    const registry = globalThis as unknown as {
+      __accountPoolMarkSessionLimit?: (
+        providerID: string,
+        accountIndex: number,
+        kind: "5h" | "weekly",
+        resetAt: number,
+      ) => void
+      __accountPoolActive?: (providerID: string) => number | null
+    }
+    registry.__accountPoolMarkSessionLimit = (providerID, accountIndex, kind, resetAt) => {
+      const p = pools.get(providerID)
+      if (!p) return
+      p.markSessionLimit(accountIndex, kind, resetAt)
+    }
+    registry.__accountPoolActive = (providerID) => {
+      const p = pools.get(providerID)
+      if (!p) return null
+      return p.active().index
     }
 
     return {
@@ -1329,6 +1376,17 @@ export namespace Provider {
 
   export async function accountsStatus() {
     const s = await state()
+    const now = Date.now()
+    const WINDOW_5H_MS = 5 * 60 * 60 * 1000
+    const WINDOW_7D_MS = 7 * 24 * 60 * 60 * 1000
+    const countAfter = (arr: number[], cutoff: number) => {
+      let n = 0
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (arr[i] < cutoff) break
+        n++
+      }
+      return n
+    }
     const result: Record<
       string,
       {
@@ -1337,11 +1395,16 @@ export namespace Provider {
         accounts: Array<{
           index: number
           label: string
+          email?: string
           status: "active" | "cooldown" | "disabled"
           requestCount: number
           tokenCount: number
           switchCount: number
           cooldownUntil?: number
+          session5hCount: number
+          session5hResetAt?: number
+          weeklyCount: number
+          weeklyResetAt?: number
         }>
       }
     > = {}
@@ -1353,11 +1416,16 @@ export namespace Provider {
         accounts: pool.states().map((a) => ({
           index: a.info.index,
           label: a.info.label,
+          email: a.info.email,
           status: a.status,
           requestCount: a.requestCount,
           tokenCount: a.tokenCount,
           switchCount: a.switchCount,
           cooldownUntil: a.cooldownUntil,
+          session5hCount: countAfter(a.windowRecent, now - WINDOW_5H_MS),
+          session5hResetAt: a.session5hResetAt,
+          weeklyCount: countAfter(a.windowDaily, now - WINDOW_7D_MS),
+          weeklyResetAt: a.weeklyResetAt,
         })),
       }
     }

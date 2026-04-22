@@ -6,9 +6,9 @@ import { formatBlock, type RefHealthMap } from "./injector"
 import { logEntry } from "./injection-log"
 import { verifyDocRefs } from "./refs"
 import { detectGitEvent, detectGhEvent, toCaptureEvent } from "./git-event-detector"
+import { getVaultIndex, type VaultIndex } from "./vault-index"
 import { computePageRank, seedsFromPrompt } from "./pagerank"
 import { buildCommunities } from "./communities"
-import { getVaultIndex } from "./vault-index"
 import { noteSessionIdle, runReflection } from "./reflection-scheduler"
 import { isValidAt, toEntry } from "./parse-entry"
 import { expandQueryHyde, hybridRank, rankMemories } from "./retrieval"
@@ -21,10 +21,76 @@ import { detectScope } from "./scope"
 import type { MemoryConfig, MemoryDoc, Scope, VaultDocs } from "./types"
 import { fingerprint, loadAll, writeNote } from "./vault"
 import { buildSummary, formatSummaryNote } from "./session-summary"
+import { recentAssistantTexts, toCaptureEvents } from "./assistant-capture"
+import { runGc } from "./gc"
 import { runAutoInit, shouldAutoInit } from "./auto-init"
 import * as Profile from "./profile"
 
 const log = Log.create({ service: "plugin.obsidian-memory" })
+
+const MCP_USAGE_HINT = [
+  "<memory-tools>",
+  "**You have persistent memory across sessions.** Prior decisions, gotchas, conventions, and work history live in an Obsidian vault reachable through these tools. USE THEM — don't rediscover what's already captured, don't ask the user to repeat context you could retrieve.",
+  "",
+  "## Tools",
+  "",
+  "RETRIEVAL (get context):",
+  "- memory.search(query, limit?) — hybrid retrieval (BM25+vector+entity+recency+pagerank). Returns SNIPPETS.",
+  "- memory.list(limit?, kind?) — newest memories first; for browsing when no specific query.",
+  "- memory.get(paths[]) — full body of specific memory files. Call AFTER search when the snippet isn't enough.",
+  "",
+  "CURATION (create / review):",
+  "- memory.save(title, body, kind?, importance?) — PIN a new memory. Use when user says 'lembre disso' or when YOU discover a non-obvious insight the user will want next session.",
+  "- memory.update(path, body, reason?) — CORRECT an existing memory. Use when user refines/contradicts previously-captured info; old body auto-backed to .bak.",
+  "- memory.suggested() / memory.approve(filename) / memory.reject(filename) — review pending auto-captures.",
+  "",
+  "DIAGNOSIS: memory.stats() | memory.health()",
+  "QUALITY: memory.eval(rebuild?) — retrieval regression check (_eval/LATEST.md).",
+  "",
+  "## WHEN TO CALL memory.search (ALWAYS, when you detect any of):",
+  "",
+  "1. User mentions past work: 'como fizemos X', 'o que sabemos sobre Y', 'por que escolhemos Z'",
+  "2. User asks about a file/module/concept not in your current context",
+  "3. User proposes a design decision — check for prior decisions or contradictions first",
+  "4. User reports a bug — check for matching gotcha notes first",
+  "5. User asks 'qual o padrão' / 'qual a convenção'",
+  "6. You're about to implement something non-trivial — check prior decisions/conventions/gotchas",
+  "7. User references a person/project/meeting you don't know about",
+  "",
+  "## WHEN TO CALL memory.save (proactively, without asking):",
+  "",
+  "1. User says 'lembre disso' / 'remember this' / 'anota' / 'guarda isso' — save immediately",
+  "2. User confirms a non-obvious design decision ('vamos usar X porque Y')",
+  "3. User describes a subtle gotcha ('cuidado com X, porque Y')",
+  "4. User establishes a convention ('sempre fazemos X aqui')",
+  "5. You resolved a tricky bug whose root cause isn't obvious — save the gotcha",
+  "",
+  "Do NOT save routine reads, trivial edits, or things already in memory (search first).",
+  "",
+  "## CONTRADICTION HANDLING",
+  "",
+  "If memory.search returns a note that contradicts what the user is now saying:",
+  "1. Surface the contradiction explicitly ('earlier note says X, you're now saying Y — which is current?')",
+  "2. Ask which is current",
+  "3. Call memory.save with the new truth (old one will be auto-marked superseded by the capture-gate)",
+  "",
+  "## FEW-SHOTS",
+  "",
+  "User: 'como fizemos auth nesse projeto?'",
+  "→ memory.search('auth design decision project') → read snippets → answer with specifics from notes",
+  "",
+  "User: 'lembra que decidimos usar MSW pros tests?'",
+  "→ memory.search('MSW test mocking convention') → confirm or correct with what vault says",
+  "",
+  "User: 'adiciona JWT refresh'",
+  "→ memory.search('JWT auth token refresh') FIRST → if prior impl found, match style; if not, implement fresh",
+  "",
+  "User: 'anota que o webpack proxy precisa target explícito'",
+  "→ memory.save('Webpack proxy needs explicit target', '<body with context, why, refs>', 'gotcha', 0.8)",
+  "",
+  "The injected memory block above is a SNAPSHOT (fingerprint + top-K). **These tools reach the full vault.** Prefer tools over guessing. Prefer search over asking the user to repeat.",
+  "</memory-tools>",
+].join("\n")
 
 const CACHE_TTL_MS = 30_000
 const DEFAULT_MAX_BYTES = 6000
@@ -208,6 +274,36 @@ function prependProactive(all: MemoryDoc[], ranked: VaultDocs, active: Set<strin
  * - `tool.execute.after`: feeds tool outcomes to capture gate
  * - `event`: drives session.idle flush + session.deleted cleanup
  */
+function watchVaultScope(scope: Scope, idx: VaultIndex, watchers: Map<string, { close: () => void }>) {
+  for (const dir of [scope.notesDir, scope.suggestedDir].filter(Boolean) as string[]) {
+    if (watchers.has(dir)) continue
+    try {
+      const debounced = new Map<string, ReturnType<typeof setTimeout>>()
+      const watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
+        if (!filename || !filename.endsWith(".md")) return
+        const filepath = path.join(dir, filename)
+        const prev = debounced.get(filepath)
+        if (prev) clearTimeout(prev)
+        debounced.set(
+          filepath,
+          setTimeout(() => {
+            debounced.delete(filepath)
+            idx.reconcilePath(filepath)
+              .then((action) => {
+                if (action !== "skipped") log.debug("vault watcher reconciled", { filepath, action })
+              })
+              .catch((err) => log.warn("vault watcher reconcile failed", { filepath, error: String(err) }))
+          }, 500),
+        )
+      })
+      watchers.set(dir, watcher)
+      log.info("vault watcher armed", { dir })
+    } catch (err) {
+      log.warn("vault watcher setup failed", { dir, error: String(err) })
+    }
+  }
+}
+
 export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   log.info("loading plugin")
 
@@ -224,12 +320,24 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
   const vectorStores = new Map<string, VectorStore>()
   let vectorStore: VectorStore | undefined
 
+  const bootstrapped = new Set<string>()
+  const watchers = new Map<string, { close: () => void }>()
   const resolveScope = async (): Promise<Scope | null> => {
     if (!cfgRef?.enabled) return null
     const cwd = process.cwd()
-    const scope = await detectScope({ worktree: cwd, vaultPath: cfgRef.vaultPath })
-    if (scope) return scope
-    return detectScope({ worktree: input.worktree, vaultPath: cfgRef.vaultPath })
+    let scope = await detectScope({ worktree: cwd, vaultPath: cfgRef.vaultPath })
+    if (!scope) scope = await detectScope({ worktree: input.worktree, vaultPath: cfgRef.vaultPath })
+    if (scope && !bootstrapped.has(scope.vaultRoot)) {
+      bootstrapped.add(scope.vaultRoot)
+      const idx = getVaultIndex(scope.vaultRoot)
+      if (idx.count() === 0 || (await idx.isStale(scope))) {
+        idx.rebuild(scope)
+          .then((n) => log.info("vault index bootstrap rebuild", { vaultRoot: scope!.vaultRoot, indexed: n }))
+          .catch((err) => log.warn("vault index bootstrap rebuild failed", { error: String(err) }))
+      }
+      watchVaultScope(scope, idx, watchers)
+    }
+    return scope
   }
 
   return {
@@ -249,15 +357,15 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         vaultPath: anyCfg.memory.vaultPath,
         maxBytes: anyCfg.memory.maxBytes ?? DEFAULT_MAX_BYTES,
         maxNotes: anyCfg.memory.maxNotes ?? DEFAULT_MAX_NOTES,
-        autoCapture: anyCfg.memory.autoCapture ?? false,
+        autoCapture: anyCfg.memory.autoCapture ?? true,
         captureModel: anyCfg.memory.captureModel ?? DEFAULT_CAPTURE_MODEL,
-        autoConsolidate: anyCfg.memory.autoConsolidate ?? false,
+        autoConsolidate: anyCfg.memory.autoConsolidate ?? true,
         consolidateModel: anyCfg.memory.consolidateModel ?? DEFAULT_CONSOLIDATE_MODEL,
         injectionStyle: anyCfg.memory.injectionStyle ?? "full",
-        smartRetrieval: anyCfg.memory.smartRetrieval ?? false,
-        hydeExpansion: anyCfg.memory.hydeExpansion ?? false,
+        smartRetrieval: anyCfg.memory.smartRetrieval ?? true,
+        hydeExpansion: anyCfg.memory.hydeExpansion ?? true,
         suggestThreshold: anyCfg.memory.suggestThreshold ?? 0,
-        sessionSummary: anyCfg.memory.sessionSummary ?? false,
+        sessionSummary: anyCfg.memory.sessionSummary ?? true,
       }
       anyCfg.command ??= {}
       if (!anyCfg.command["memory"]) {
@@ -273,6 +381,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         dimensions: cfgRef.embedDimensions,
       })
       if (cfgRef.autoCapture) {
+        const dryRun = (anyCfg.memory as { captureDryRun?: boolean })?.captureDryRun ?? false
         captureGate = new CaptureGate({
           enabled: true,
           model: cfgRef.captureModel,
@@ -280,10 +389,12 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           scopeResolver: async () => resolveScope(),
           embedder,
           getVectorStore: () => vectorStore,
+          dryRun,
         })
         log.info("auto-capture enabled", {
           model: cfgRef.captureModel,
           suggestThreshold: cfgRef.suggestThreshold,
+          dryRun,
         })
       }
     },
@@ -335,10 +446,11 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
         else if (verb === "search") result = await Commands.search(scope, rest)
         else if (verb === "health") result = await Commands.health(scope)
         else if (verb === "community") result = await Commands.community(scope, rest)
+        else if (verb === "eval") result = await Commands.runEval(scope, rest)
         else
           result = {
             ok: false,
-            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject|search|health|community`,
+            text: `[memory] unknown verb "${verb}". use save|list|show|stats|suggested|approve|reject|search|health|community|eval`,
           }
       } catch (err) {
         result = { ok: false, text: `[memory] error: ${err instanceof Error ? err.message : String(err)}` }
@@ -361,12 +473,19 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       // but the memory context is valuable for any provider.
       if (!hookInput.model) return
 
+      const traceStart = Date.now()
+      const trace: Record<string, number> = {}
+      const tick = (label: string) => {
+        trace[label] = Date.now() - traceStart
+      }
+
       let scope: Scope | null = null
       try {
         scope = await resolveScope()
       } catch (err) {
         log.error("resolveScope threw", { error: String(err) })
       }
+      tick("resolveScope")
 
       if (!scope && cfgRef.vaultPath) {
         const root = cfgRef.vaultPath.startsWith("~/") ? path.join(os.homedir(), cfgRef.vaultPath.slice(2)) : cfgRef.vaultPath
@@ -434,6 +553,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       } else {
         try {
           const docs = await loadAll(scope, cfgRef.maxNotes)
+          tick("loadAll")
           const activeFiles = hookInput.sessionID ? sessionFiles.get(hookInput.sessionID) : undefined
           vectorStore = vectorStores.get(scope.repoSlug)
           if (!vectorStore) {
@@ -470,6 +590,7 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
             }
           }
           const ranked = await maybeRank(scope, userPrompt, docs, cfgRef, activeFiles, embedder, vectorStore)
+          tick("rank")
           const injected = activeFiles?.size ? prependProactive(docs.notes, ranked, activeFiles) : ranked
           const refHealth = await buildRefHealthMap(input.worktree, injected)
           block = formatBlock(
@@ -491,12 +612,21 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
 
       if (!block) return
       hookOutput.system.push(block)
+      hookOutput.system.push(MCP_USAGE_HINT)
       log.info("memory injected", {
         scope: `${scope.repoSlug}::${scope.branchSlug}`,
         bytes: block.length,
         fingerprint: fp.slice(0, 8),
         smart: cfgRef.smartRetrieval,
         hyde: cfgRef.hydeExpansion,
+      })
+      tick("inject")
+      log.info("memory inject trace", {
+        sessionID: hookInput.sessionID,
+        bytes: block.length,
+        cached: wasCached,
+        totalMs: Date.now() - traceStart,
+        trace,
       })
       logEntry({
         kind: "inject",
@@ -558,11 +688,10 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       const evList = sessionEvents.get(hookInput.sessionID) ?? []
       if (evList.length === 0) sessionEvents.set(hookInput.sessionID, evList)
       evList.push(ev)
-      // AWAIT the enqueue — this is critical for `opencode run` single-shot
-      // mode where the process exits immediately after session.idle and
-      // fire-and-forget timers never run. The gate's internal debounce
-      // still batches rapid events within a turn.
-      await captureGate.enqueue(ev)
+      // Fire-and-forget: event is sync-pushed to internal queue; debounced
+      // flush runs async. session.idle handler awaits final flush, so
+      // single-shot `opencode run` mode still drains correctly.
+      void captureGate.enqueue(ev).catch((err) => log.warn("enqueue failed", { error: String(err) }))
 
       // Git event enrichment: when the agent runs `git <subcommand>` via
       // bash, surface it as an additional high-signal capture event so
@@ -574,7 +703,9 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
           const output = typeof hookOutput.output === "string" ? hookOutput.output : undefined
           const candidate = detectGitEvent(command, output) ?? detectGhEvent(command, output)
           if (candidate) {
-            await captureGate.enqueue(toCaptureEvent(candidate, hookInput.sessionID))
+            void captureGate
+              .enqueue(toCaptureEvent(candidate, hookInput.sessionID))
+              .catch((err) => log.warn("git enqueue failed", { error: String(err) }))
           }
         }
       }
@@ -585,7 +716,24 @@ export async function ObsidianMemoryPlugin(input: PluginInput): Promise<Hooks> {
       if (event.type === "session.idle") {
         const props = event.properties as { sessionID?: string } | undefined
         if (props?.sessionID) {
+          const assistantTexts = recentAssistantTexts(props.sessionID)
+          if (assistantTexts.length > 0) {
+            const evs = toCaptureEvents(props.sessionID, assistantTexts)
+            log.info("assistant capture: enqueueing high-signal responses", {
+              sessionID: props.sessionID,
+              count: evs.length,
+            })
+            for (const ev of evs) {
+              void captureGate.enqueue(ev).catch((err) => log.warn("assistant enqueue failed", { error: String(err) }))
+            }
+          }
           await captureGate.flush(props.sessionID, signal).catch(() => undefined)
+          if (Math.random() < 0.05) {
+            const scope = await resolveScope()
+            if (scope) {
+              void runGc(scope).catch((err) => log.warn("gc failed", { error: String(err) }))
+            }
+          }
           if (cfgRef?.sessionSummary) {
             const evs = sessionEvents.get(props.sessionID) ?? []
             const files = sessionFiles.get(props.sessionID) ?? new Set<string>()

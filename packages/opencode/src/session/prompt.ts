@@ -49,6 +49,8 @@ import { Truncate } from "@/tool/truncation"
 import { CircuitBreaker } from "./circuit-breaker"
 import { Budget } from "./budget"
 import { Intent } from "../agent/intent"
+import { Caveman } from "./caveman"
+import { CavemanState } from "./caveman-state"
 import { record } from "@/resource/usage"
 
 // @ts-ignore
@@ -575,6 +577,7 @@ export namespace SessionPrompt {
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
       const isLastStep = step >= maxSteps
+      msgs = applyContextBudget({ messages: msgs, agent })
       msgs = await insertReminders({
         messages: msgs,
         agent,
@@ -673,7 +676,36 @@ export namespace SessionPrompt {
           .filter((p) => p.type === "text" && !p.synthetic)
           .map((p) => (p as { text: string }).text)
           .join(" ") ?? ""
-        if (text) system.push(Intent.hint(Intent.classify(text)))
+        if (text) {
+          const base = await Caveman.settings()
+          const cfg = Caveman.forAgent(base, agent.name)
+          const classified = await Intent.classify(text, {
+            classifier: cfg.classifier,
+            timeoutMs: cfg.classifierTimeoutMs,
+          })
+          system.push(Intent.hint(classified))
+          CavemanState.touch()
+          if (Caveman.reenabledByMessage(text)) CavemanState.enable(sessionID)
+          else if (Caveman.disabledByMessage(text)) CavemanState.disable(sessionID)
+          const ancestors: string[] = []
+          let cur = session
+          while (cur.parentID) {
+            ancestors.push(cur.parentID)
+            cur = await Session.get(cur.parentID)
+          }
+          if (!CavemanState.disabled(sessionID, ancestors) && Caveman.shouldActivate(classified.type, text, cfg)) {
+            system.push(Caveman.hint(cfg.level))
+            log.info("caveman activated", {
+              level: cfg.level,
+              intent: classified.type,
+              confidence: classified.confidence,
+              classifier: classified.source,
+              agent: agent.name,
+              sessionID,
+              parentID: session.parentID,
+            })
+          }
+        }
       }
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
@@ -1355,6 +1387,56 @@ export namespace SessionPrompt {
       info,
       parts,
     }
+  }
+
+  function estimateMessageTokens(msg: MessageV2.WithParts): number {
+    if (msg.info.role === "assistant") {
+      const t = msg.info.tokens
+      if (t && (t.input || t.output)) return (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0)
+    }
+    let chars = 0
+    for (const p of msg.parts) {
+      if (p.type === "text") chars += p.text?.length ?? 0
+      else if (p.type === "reasoning") chars += (p as any).text?.length ?? 0
+      else if (p.type === "tool") {
+        const state = (p as any).state
+        if (state?.type === "completed") {
+          chars += JSON.stringify(state.input ?? "").length
+          chars += typeof state.output === "string" ? state.output.length : JSON.stringify(state.output ?? "").length
+        }
+      }
+    }
+    return Math.ceil(chars / 4)
+  }
+
+  function applyContextBudget(input: { messages: MessageV2.WithParts[]; agent: Agent.Info }): MessageV2.WithParts[] {
+    const budget = input.agent.contextBudget
+    if (!budget || budget <= 0) return input.messages
+    const msgs = input.messages
+    let lastUserIdx = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].info.role === "user") {
+        lastUserIdx = i
+        break
+      }
+    }
+    if (lastUserIdx < 0) return msgs
+
+    const tail = msgs.slice(lastUserIdx)
+    const tailCost = tail.reduce((acc, m) => acc + estimateMessageTokens(m), 0)
+    let budgetLeft = budget - tailCost
+    if (budgetLeft <= 0) return tail
+
+    const kept: MessageV2.WithParts[] = []
+    for (let i = lastUserIdx - 1; i >= 0; i--) {
+      const cost = estimateMessageTokens(msgs[i])
+      if (cost > budgetLeft) break
+      kept.unshift(msgs[i])
+      budgetLeft -= cost
+    }
+    const dropped = msgs.length - (kept.length + tail.length)
+    if (dropped > 0) log.info("contextBudget truncation", { agent: input.agent.name, dropped, budget, remaining: budgetLeft })
+    return [...kept, ...tail]
   }
 
   async function insertReminders(input: { messages: MessageV2.WithParts[]; agent: Agent.Info; session: Session.Info }) {

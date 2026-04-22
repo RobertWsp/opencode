@@ -13,6 +13,25 @@ import { useKV } from "../../context/kv"
 import { useSDK } from "../../context/sdk"
 import { TodoItem } from "../../component/todo-item"
 
+/**
+ * Human-readable "time until reset" — used for cooldowns and session limits.
+ *   >1h → "in 2h15m"
+ *   minutes → "in 42m"
+ *   <60s → "in 30s"
+ */
+function formatResetDelta(timestamp: number): string {
+  const diff = Math.max(0, timestamp - Date.now())
+  if (diff >= 60 * 60 * 1000) {
+    const h = Math.floor(diff / (60 * 60 * 1000))
+    const m = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000))
+    return `in ${h}h${m ? `${m}m` : ""}`
+  }
+  if (diff >= 60_000) {
+    return `in ${Math.floor(diff / 60_000)}m`
+  }
+  return `in ${Math.max(1, Math.ceil(diff / 1000))}s`
+}
+
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
   const sdk = useSDK()
@@ -250,37 +269,48 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                     {(providerData) => (
                       <For each={providerData.accounts}>
                         {(account) => (
-                          <box flexDirection="row" gap={1}>
-                            <text
-                              flexShrink={0}
-                              style={{
-                                fg: (
-                                  {
-                                    active: theme.success,
-                                    cooldown: theme.warning,
-                                    disabled: theme.error,
-                                  } as Record<string, typeof theme.success>
-                                )[account.status],
-                              }}
-                            >
-                              {account.index === providerData.activeIndex ? "●" : "○"}
-                            </text>
-                            <text fg={theme.text} wrapMode="word">
-                              {account.label}{" "}
-                              <span style={{ fg: theme.textMuted }}>
-                                {account.requestCount} reqs{" "}
+                          <box flexDirection="column">
+                            <box flexDirection="row" gap={1}>
+                              <text
+                                flexShrink={0}
+                                style={{
+                                  fg: (
+                                    {
+                                      active: theme.success,
+                                      cooldown: theme.warning,
+                                      disabled: theme.error,
+                                    } as Record<string, typeof theme.success>
+                                  )[account.status],
+                                }}
+                              >
+                                {account.index === providerData.activeIndex ? "●" : "○"}
+                              </text>
+                              <text fg={theme.text} wrapMode="word">
+                                {account.email ?? account.label}
+                              </text>
+                            </box>
+                            <box flexDirection="row" paddingLeft={2}>
+                              <text fg={theme.textMuted} wrapMode="word">
                                 <Switch>
-                                  <Match when={account.status === "active"}>active</Match>
                                   <Match when={account.status === "cooldown"}>
                                     cooldown
                                     {account.cooldownUntil
-                                      ? ` (${Math.max(0, Math.ceil((account.cooldownUntil - Date.now()) / 1000))}s)`
+                                      ? ` · resets ${formatResetDelta(account.cooldownUntil)}`
                                       : ""}
                                   </Match>
                                   <Match when={account.status === "disabled"}>disabled</Match>
+                                  <Match when={account.session5hResetAt && account.session5hResetAt > Date.now()}>
+                                    5h limit · resets {formatResetDelta(account.session5hResetAt!)}
+                                  </Match>
+                                  <Match when={account.weeklyResetAt && account.weeklyResetAt > Date.now()}>
+                                    weekly limit · resets {formatResetDelta(account.weeklyResetAt!)}
+                                  </Match>
+                                  <Match when={true}>
+                                    {account.session5hCount} msg/5h · {account.weeklyCount} msg/7d
+                                  </Match>
                                 </Switch>
-                              </span>
-                            </text>
+                              </text>
+                            </box>
                           </box>
                         )}
                       </For>

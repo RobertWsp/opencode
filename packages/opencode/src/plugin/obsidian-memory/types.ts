@@ -162,6 +162,42 @@ export interface Scope {
   systemDir: string
   /** `<systemDir>/MEMORY.md` — user preferences + feedback index */
   systemSharedPath: string
+  /**
+   * True when the scope was derived from a non-git directory via the
+   * `local:` canonicalization fallback. Synthetic scopes still partition
+   * memory per-directory (so two different non-git dirs don't collide) but
+   * have no branch concept — everything goes to the `_nogit` branch slug.
+   * Consumers that commit back to a repo (VaultGit) already short-circuit
+   * on failure and are safe with this flag.
+   */
+  synthetic?: boolean
+  /**
+   * True when the repoSlug was pinned by a `.obsidian-memory-scope.json`
+   * anchor file at the worktree root. Anchors preserve identity across
+   * git transitions (e.g. `git init` adding a remote would change the
+   * natural slug; the anchor keeps notes reachable).
+   */
+  anchored?: boolean
+  /**
+   * Natural repoSlug (as would have been derived without an anchor). When
+   * present and different from `repoSlug`, retrieval performs a union
+   * search across both slugs — covers the grace-period between the first
+   * (unanchored) save and the anchor being written.
+   */
+  naturalRepoSlug?: string
+  /**
+   * Natural branchSlug (as would have been derived without the fallback).
+   * Populated when current scope is synthetic but a git branch was
+   * historically in use, or vice-versa. Retrieval unions notes across
+   * both branches within the same repoSlug.
+   */
+  naturalBranchSlug?: string
+  /**
+   * The worktree directory from which this scope was resolved. Downstream
+   * writers (anchor emission, log correlation) use this to locate the
+   * origin project without re-plumbing the value through every call site.
+   */
+  worktree?: string
 }
 
 export interface MemoryDoc {

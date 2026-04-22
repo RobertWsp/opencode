@@ -142,7 +142,34 @@ export async function writeNote(
     await VaultGit.ensureAndCommit(scope.vaultRoot, message)
   }
 
+  // Drop a scope anchor in the worktree on first successful save so the
+  // repoSlug survives git transitions (init, remote add, .git deletion,
+  // dir rename). Best-effort: failures never propagate.
+  await maybeEmitAnchor(scope).catch(() => undefined)
+
   return filepath
+}
+
+async function maybeEmitAnchor(scope: Scope): Promise<void> {
+  if (!scope.worktree) return
+  if (process.env.OBSIDIAN_MEMORY_DISABLE_ANCHOR === "1") return
+  const { readAnchor, writeAnchor, createAnchor } = await import("./scope-anchor")
+  const existing = await readAnchor(scope.worktree)
+  if (existing.anchor) return
+  // Emit for BOTH synthetic and git scopes. Synthetic anchors pay forward:
+  // if the user later `git init`s and adds a remote, the anchor pins the
+  // synthetic slug so memories stay reachable. Without this, the
+  // non-git → git+remote transition loses identity.
+  const anchor = createAnchor({
+    repoSlug: scope.repoSlug,
+    identity: scope.synthetic
+      ? scope.basename + " (no-git, pinned)"
+      : scope.basename + " (" + scope.branchSlug + ")",
+    note:
+      "Auto-written on first memory save. Delete to force re-detection. " +
+      "Add to .gitignore so clones don't inherit this machine's slug.",
+  })
+  await writeAnchor(scope.worktree, anchor)
 }
 
 /**

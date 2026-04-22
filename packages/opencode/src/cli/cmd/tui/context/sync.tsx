@@ -79,11 +79,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           accounts: Array<{
             index: number
             label: string
+            email?: string
             status: "active" | "cooldown" | "disabled"
             requestCount: number
             tokenCount: number
             switchCount: number
             cooldownUntil?: number
+            session5hCount: number
+            session5hResetAt?: number
+            weeklyCount: number
+            weeklyResetAt?: number
           }>
         }
       }
@@ -369,8 +374,32 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "account.status": {
-          const { providerID, accounts } = event.properties
-          setStore("accounts", providerID, reconcile({ providerID, activeIndex: 0, accounts }))
+          const { providerID, accounts } = event.properties as {
+            providerID: string
+            accounts: Array<{
+              index: number
+              label: string
+              email?: string
+              status: "active" | "cooldown" | "disabled"
+              requestCount: number
+              tokenCount: number
+              switchCount: number
+              cooldownUntil?: number
+              session5hCount?: number
+              session5hResetAt?: number
+              weeklyCount?: number
+              weeklyResetAt?: number
+            }>
+          }
+          // Normalize against older SDK payloads that don't carry window
+          // counters (e.g. server still on a previous build). UI stays
+          // usable — just shows 0 msg/5h until next emit.
+          const normalized = accounts.map((a) => ({
+            ...a,
+            session5hCount: a.session5hCount ?? 0,
+            weeklyCount: a.weeklyCount ?? 0,
+          }))
+          setStore("accounts", providerID, reconcile({ providerID, activeIndex: 0, accounts: normalized }))
           break
         }
       }
@@ -446,7 +475,26 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data))),
             sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!))),
-            sdk.client.provider.accounts().then((x) => setStore("accounts", reconcile(x.data ?? {}))),
+            sdk.client.provider.accounts().then((x) => {
+              // SDK-generated type lags behind server schema for optional
+              // session-window fields. Coerce + default so the UI doesn't
+              // crash if the server omits them.
+              const raw = (x.data ?? {}) as Record<string, { providerID: string; activeIndex: number; accounts: any[] }>
+              const normalized = Object.fromEntries(
+                Object.entries(raw).map(([k, v]) => [
+                  k,
+                  {
+                    ...v,
+                    accounts: (v.accounts ?? []).map((a: any) => ({
+                      ...a,
+                      session5hCount: a.session5hCount ?? 0,
+                      weeklyCount: a.weeklyCount ?? 0,
+                    })),
+                  },
+                ]),
+              )
+              setStore("accounts", reconcile(normalized))
+            }),
           ]).then(() => {
             setStore("status", "complete")
           })

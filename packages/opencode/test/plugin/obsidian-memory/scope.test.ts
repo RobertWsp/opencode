@@ -52,11 +52,55 @@ describe("detectScope", () => {
     expect(result).toBeNull()
   })
 
-  test("returns null when worktree is not a git repo", async () => {
+  test("returns synthetic scope when worktree is not a git repo (default)", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omem-nogit-"))
     tempDirs.push(dir)
     const result = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
-    expect(result).toBeNull()
+    expect(result).not.toBeNull()
+    expect(result!.synthetic).toBe(true)
+    expect(result!.branchSlug).toBe("_nogit")
+    expect(result!.branchRaw).toBe("")
+    expect(result!.shortHash).toHaveLength(6)
+    expect(result!.repoSlug).toMatch(/^omem-nogit-[a-z0-9-]+-[a-f0-9]{6}$/)
+  })
+
+  test("synthetic scope is stable for the same directory", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omem-nogit-stable-"))
+    tempDirs.push(dir)
+    const r1 = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
+    const r2 = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
+    expect(r1!.repoSlug).toBe(r2!.repoSlug)
+    expect(r1!.shortHash).toBe(r2!.shortHash)
+  })
+
+  test("synthetic scopes for different dirs have different slugs", async () => {
+    const a = await fs.mkdtemp(path.join(os.tmpdir(), "omem-nogit-a-"))
+    const b = await fs.mkdtemp(path.join(os.tmpdir(), "omem-nogit-b-"))
+    tempDirs.push(a, b)
+    const r1 = await detectScope({ worktree: a, vaultPath: "/tmp/vault" })
+    const r2 = await detectScope({ worktree: b, vaultPath: "/tmp/vault" })
+    expect(r1!.repoSlug).not.toBe(r2!.repoSlug)
+  })
+
+  test("OBSIDIAN_MEMORY_REQUIRE_GIT=1 restores strict behavior (null)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omem-nogit-strict-"))
+    tempDirs.push(dir)
+    const prev = process.env.OBSIDIAN_MEMORY_REQUIRE_GIT
+    process.env.OBSIDIAN_MEMORY_REQUIRE_GIT = "1"
+    try {
+      const result = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
+      expect(result).toBeNull()
+    } finally {
+      if (prev === undefined) delete process.env.OBSIDIAN_MEMORY_REQUIRE_GIT
+      else process.env.OBSIDIAN_MEMORY_REQUIRE_GIT = prev
+    }
+  })
+
+  test("git repos still return non-synthetic scope", async () => {
+    const dir = await track(makeRepo({ remote: "git@github.com:foo/bar.git" }))
+    const result = await detectScope({ worktree: dir, vaultPath: "/tmp/vault" })
+    expect(result!.synthetic).toBeUndefined()
+    expect(result!.branchSlug).not.toBe("_nogit")
   })
 
   test("slugs a repo with remote URL deterministically", async () => {

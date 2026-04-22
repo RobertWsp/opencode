@@ -11,6 +11,7 @@ import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 import { Tiering } from "../agent/tiering"
+import { MCP } from "../mcp"
 
 const active = new Map<string, number>()
 const failures = new Map<string, number>()
@@ -21,7 +22,13 @@ function increment(session: string) {
 
 function decrement(session: string) {
   const n = (active.get(session) ?? 1) - 1
-  if (n <= 0) active.delete(session)
+  if (n <= 0) {
+    // Delete and return — do NOT re-set to 0, that leaks entries in
+    // the active map and breaks maxParallel accounting across long
+    // sessions that repeatedly spawn+finish subagents.
+    active.delete(session)
+    return
+  }
   active.set(session, n)
 }
 
@@ -44,6 +51,12 @@ const parameters = z.object({
     )
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
+  tier: z
+    .enum(["quality", "balanced", "budget", "adaptive", "inherit"])
+    .describe(
+      "Optional tier override (quality=Opus, balanced=Sonnet, budget=Haiku). When set, the subagent uses this tier's model regardless of the agent's own tier. Used by the model router to dispatch a tier-specific spawn.",
+    )
+    .optional(),
 })
 
 export const TaskTool = Tool.define("task", async (ctx) => {
@@ -87,6 +100,14 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         const running = active.get(ctx.sessionID) ?? 0
         if (running >= agent.maxParallel)
           throw new Error(`Max parallel tasks reached (${agent.maxParallel}). Wait for running tasks to complete.`)
+      }
+
+      // Explicit task_id resume is a user-initiated retry — reset the
+      // consecutive-failure counter so we don't block legitimate retries
+      // of a previously-failed task. The 3-strikes guard is only meant
+      // to stop runaway automatic loops, not deliberate resumes.
+      if (params.task_id) {
+        clearFailures(ctx.sessionID)
       }
 
       const consecutive = failures.get(ctx.sessionID) ?? 0
@@ -135,8 +156,33 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
-      const model = agent.model
-        ?? (agent.tier ? Tiering.resolve(agent.tier, msg.info.providerID) : undefined)
+      // Resolution order:
+      //   1. Explicit tier override on the call (router-driven spawn)
+      //   2. Agent.model (if the agent pins a specific model)
+      //   3. Agent.tier (the agent's declared tier)
+      //   4. Inherit parent's modelID
+      //
+      // Tiering.resolve() returns "" for adaptive/inherit (no DEFAULTS
+      // entries). Resolve those abstract tiers to concrete ones first,
+      // then ask Tiering.resolve for the modelID mapping.
+      function resolveConcreteTier(t: Tiering.Tier | undefined): Tiering.Tier | undefined {
+        if (!t) return undefined
+        if (t === "inherit") return undefined // let the ?? chain fall through to parent
+        if (t === "adaptive") {
+          // We don't have rich history here — approximate via the parent
+          // assistant message's token usage. Cheap; the classifier
+          // elsewhere does the real work.
+          const assistantInfo = msg.info as MessageV2.Assistant
+          const parentTokens = assistantInfo.tokens?.input ?? 0
+          return Tiering.adaptive({ tokens: parentTokens, tools: 0, files: 0 })
+        }
+        return t
+      }
+      const tierOverrideConcrete = resolveConcreteTier(params.tier)
+      const agentTierConcrete = resolveConcreteTier(agent.tier)
+      const model = (tierOverrideConcrete ? Tiering.resolve(tierOverrideConcrete, msg.info.providerID) : undefined)
+        ?? agent.model
+        ?? (agentTierConcrete ? Tiering.resolve(agentTierConcrete, msg.info.providerID) : undefined)
         ?? {
           modelID: msg.info.modelID,
           providerID: msg.info.providerID,
@@ -173,26 +219,82 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
       increment(ctx.sessionID)
       using _track = defer(() => decrement(ctx.sessionID))
-      const result = await SessionPrompt.prompt({
-        messageID,
-        sessionID: session.id,
-        model: {
-          modelID: model.modelID,
-          providerID: model.providerID,
-        },
-        agent: agent.name,
-        tools: {
-          todowrite: false,
-          todoread: false,
-          ...(hasTaskPermission ? {} : { task: false }),
-          ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
-        },
-        parts: promptParts,
-      })
+      let result
+      // Subagents default-off for todowrite/todoread (parent owns the plan
+      // list). All OTHER registry tools — including `skill`, `skill_search`
+      // and every MCP (gateway + connected) — are left unset here so they
+      // land in the subagent's tool schema by default. The per-agent
+      // `permission` map (e.g. explore deny write/edit) still filters them
+      // at invocation time via `PermissionNext.disabled`, so read-only
+      // agents stay read-only; they just gain access to lookup/search
+      // tools they were silently missing before.
+      //
+      // MCPs are enumerated explicitly with `true` so they survive the
+      // user.tools filter in llm.ts resolveTools (which deletes anything
+      // with undefined/false). This is lazy-mcp-friendly: the entries
+      // here are `mcp_activate_*` gateway tools (4 bytes of schema each)
+      // when lazy_mcp is on, NOT full MCP schemas. Connected tools come
+      // from connectedTools() already — same cost as the parent.
+      const subagentTools: Record<string, boolean> = {
+        todowrite: false,
+        todoread: false,
+        ...(hasTaskPermission ? {} : { task: false }),
+        ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
+        // Explicit allows for skill system and MCP registry. Without these
+        // the server's per-call user.tools filter strips them out even
+        // though they're registered. `false` would block; `true` keeps.
+        skill: true,
+        skill_search: true,
+      }
+      try {
+        const allMcpTools = config.experimental?.lazy_mcp
+          ? await MCP.tools().catch(() => ({}))
+          : await MCP.connectedTools().catch(() => ({}))
+        for (const toolID of Object.keys(allMcpTools)) {
+          if (!(toolID in subagentTools)) subagentTools[toolID] = true
+        }
+      } catch {
+        // MCP enumeration is best-effort — on failure the subagent still
+        // runs with core tools.
+      }
+
+      try {
+        result = await SessionPrompt.prompt({
+          messageID,
+          sessionID: session.id,
+          model: {
+            modelID: model.modelID,
+            providerID: model.providerID,
+          },
+          agent: agent.name,
+          tools: subagentTools,
+          parts: promptParts,
+        })
+      } catch (err) {
+        // Record the failure so the 3-consecutive-failure guard at the
+        // top of execute() actually protects against runaway retries.
+        // Without this, recordFailure() was dead code and the guard
+        // could never fire.
+        recordFailure(ctx.sessionID)
+        throw err
+      }
+
+      const subagentError = result.info.role === "assistant" ? result.info.error : undefined
+      const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+
+      if (subagentError && !text.trim()) {
+        recordFailure(ctx.sessionID)
+        const errMsg = JSON.stringify(subagentError)
+        throw new Error(
+          `Subagent ${agent.name} failed before producing output: ${errMsg.slice(0, 200)}. Parent should retry or delegate to a different agent.`,
+        )
+      }
 
       clearFailures(ctx.sessionID)
 
-      const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+      const statusLine = subagentError
+        ? `<task_status>PARTIAL — subagent errored after partial output (${JSON.stringify(subagentError).slice(0, 120)}). Use output below with caution; consider retrying with task_id=${session.id}.</task_status>`
+        : "<task_status>COMPLETED — results above are final. Process them now. Do not wait for further notifications.</task_status>"
 
       const output = [
         `task_id: ${session.id} (for resuming to continue this task if needed)`,
@@ -201,7 +303,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         text,
         "</task_result>",
         "",
-        "<task_status>COMPLETED — results above are final. Process them now. Do not wait for further notifications.</task_status>",
+        statusLine,
       ].join("\n")
 
       return {

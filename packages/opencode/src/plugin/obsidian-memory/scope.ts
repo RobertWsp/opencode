@@ -3,15 +3,25 @@ import { realpathSync } from "fs"
 import os from "os"
 import path from "path"
 import { git } from "../../util/git"
+import { readAnchor } from "./scope-anchor"
 import type { Scope } from "./types"
 
 /**
  * Resolve the current (repo, branch) scope from a worktree path.
  *
- * Uses git to determine the remote URL (for stable slugging across clones),
- * the topLevel path (fallback identity), and the current branch. Returns
- * `null` when git is not available, the vault path is not configured, or
- * the worktree is not inside a git repository.
+ * Happy path: uses git to determine the remote URL (for stable slugging
+ * across clones), the topLevel path (fallback identity), and the current
+ * branch.
+ *
+ * Non-git path (fallback): when git is unavailable or the worktree is not
+ * inside a git repository, falls back to a synthetic scope derived from
+ * the directory's realpath. The memory vault still works — just without
+ * branch awareness. Disable via env `OBSIDIAN_MEMORY_REQUIRE_GIT=1` if
+ * you prefer the pre-2026-04 strict behavior.
+ *
+ * Returns `null` only when the vault path is unset or the worktree path
+ * is empty. Accessible non-git directories always produce a synthetic
+ * scope in the default (non-strict) mode.
  */
 export async function detectScope(opts: {
   worktree: string
@@ -21,22 +31,54 @@ export async function detectScope(opts: {
   const cwd = opts.worktree
   if (!cwd) return null
 
+  const vaultRoot = expandTilde(opts.vaultPath)
+  const systemDir = path.join(vaultRoot, "_system")
+  const strictGit = process.env.OBSIDIAN_MEMORY_REQUIRE_GIT === "1"
+
+  // Read the scope anchor early — if present, its repoSlug overrides the
+  // natural detection result. This keeps memory reachable across git init,
+  // remote add/remove, `.git` deletion, and dir renames.
+  const anchorResult = await readAnchor(cwd)
+  const anchor = anchorResult.anchor
+
+  const natural = await detectNatural(cwd, vaultRoot, systemDir, strictGit)
+  if (!natural) return null
+
+  if (anchor && anchor.repoSlug && anchor.repoSlug !== natural.repoSlug) {
+    return { ...applyAnchor(natural, anchor.repoSlug, vaultRoot), worktree: cwd }
+  }
+  return { ...natural, worktree: cwd }
+}
+
+/**
+ * Natural (unanchored) scope derivation. Split from detectScope so the
+ * anchor override has a single, well-typed path.
+ */
+async function detectNatural(
+  cwd: string,
+  vaultRoot: string,
+  systemDir: string,
+  strictGit: boolean,
+): Promise<Scope | null> {
   try {
     const remoteRes = await git(["config", "--get", "remote.origin.url"], { cwd })
     const topLevelRes = await git(["rev-parse", "--show-toplevel"], { cwd })
     const branchRes = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd })
 
-    if (topLevelRes.exitCode !== 0) return null
+    if (topLevelRes.exitCode !== 0) {
+      if (strictGit) return null
+      return buildSyntheticScope(cwd, vaultRoot, systemDir)
+    }
 
     const remote = remoteRes.exitCode === 0 ? remoteRes.text().trim() : ""
     const topLevel = topLevelRes.text().trim() || cwd
     const branchRaw = branchRes.exitCode === 0 ? branchRes.text().trim() : ""
 
-    // Canonical identity: normalize remote URL so all forms of the same repo
-    // (ssh, https, with/without .git) produce the same hash. Falls back to
-    // realpath-resolved topLevel for repos without a remote.
     const identity = canonicalizeRemote(remote) || canonicalizeLocal(topLevel)
-    if (!identity) return null
+    if (!identity) {
+      if (strictGit) return null
+      return buildSyntheticScope(cwd, vaultRoot, systemDir)
+    }
 
     const basename = deriveBasename(identity)
     const shortHash = createHash("sha256").update(identity).digest("hex").slice(0, 6)
@@ -51,10 +93,8 @@ export async function detectScope(opts: {
       branchSlug = sanitizeBranch(branchRaw)
     }
 
-    const vaultRoot = expandTilde(opts.vaultPath)
     const repoDir = path.join(vaultRoot, "opencode", "repos", repoSlug)
     const branchDir = path.join(repoDir, "branches", branchSlug)
-    const systemDir = path.join(vaultRoot, "_system")
 
     return {
       vaultRoot,
@@ -73,7 +113,81 @@ export async function detectScope(opts: {
       systemSharedPath: path.join(systemDir, "MEMORY.md"),
     }
   } catch {
-    return null
+    if (strictGit) return null
+    return buildSyntheticScope(cwd, vaultRoot, systemDir)
+  }
+}
+
+/**
+ * Overlay an anchored repoSlug onto a natural scope. Preserves the
+ * natural values as `naturalRepoSlug` / `naturalBranchSlug` so the
+ * retrieval layer can union-search both slugs and uncover notes written
+ * before the anchor existed (e.g. first save was unanchored).
+ */
+function applyAnchor(natural: Scope, anchoredSlug: string, vaultRoot: string): Scope {
+  // naturalBranchSlug is only meaningful when the branch would differ, e.g.
+  // a previously-synthetic `_nogit` session is now on `main`. Set it only
+  // when the natural branch is synthetic/main/master — older notes are
+  // most likely there. For exotic branches we preserve them verbatim in
+  // the normal path.
+  const naturalBranchSlug = natural.branchSlug
+  const repoDir = path.join(vaultRoot, "opencode", "repos", anchoredSlug)
+  const branchDir = path.join(repoDir, "branches", natural.branchSlug)
+  return {
+    ...natural,
+    repoSlug: anchoredSlug,
+    repoDir,
+    repoSharedPath: path.join(repoDir, "MEMORY.md"),
+    branchDir,
+    branchSharedPath: path.join(branchDir, "MEMORY.md"),
+    notesDir: path.join(branchDir, "notes"),
+    suggestedDir: path.join(branchDir, "suggested"),
+    anchored: true,
+    naturalRepoSlug: natural.repoSlug,
+    naturalBranchSlug,
+  }
+}
+
+/**
+ * Synthetic scope for directories that are not inside a git repository.
+ *
+ * Partitions memory per-directory (via realpath) so two unrelated non-git
+ * workspaces (e.g. /tmp/poc-a vs /tmp/poc-b) get separate vault entries.
+ * Branch slug is always `_nogit` — synthetic scopes have no branch concept.
+ *
+ * VaultGit.commit() is best-effort (wrapped in try/catch upstream) so
+ * commits from a non-git worktree still land in the vault's OWN git
+ * history (~/Obsidian/dev-memory) without issue.
+ */
+function buildSyntheticScope(
+  cwd: string,
+  vaultRoot: string,
+  systemDir: string,
+): Scope {
+  const identity = canonicalizeLocal(cwd)
+  const basename = deriveBasename(identity)
+  const shortHash = createHash("sha256").update(identity).digest("hex").slice(0, 6)
+  const repoSlug = `${basename}-${shortHash}`
+  const branchSlug = "_nogit"
+  const repoDir = path.join(vaultRoot, "opencode", "repos", repoSlug)
+  const branchDir = path.join(repoDir, "branches", branchSlug)
+
+  return {
+    vaultRoot,
+    basename,
+    shortHash,
+    repoSlug,
+    branchRaw: "",
+    branchSlug,
+    repoDir,
+    repoSharedPath: path.join(repoDir, "MEMORY.md"),
+    branchDir,
+    branchSharedPath: path.join(branchDir, "MEMORY.md"),
+    notesDir: path.join(branchDir, "notes"),
+    suggestedDir: path.join(branchDir, "suggested"),
+    systemDir,
+    systemSharedPath: path.join(systemDir, "MEMORY.md"),
+    synthetic: true,
   }
 }
 

@@ -56,8 +56,35 @@ export const WriteTool = Tool.define("write", {
     const diagnostics = await LSP.diagnostics()
     const normalizedFilepath = Filesystem.normalizePath(filepath)
     let projectDiagnosticsCount = 0
+    let fileErrorCount = 0
+    let fileWarningCount = 0
+    const fileErrors: Array<{ line: number; character: number; message: string; source: string; code?: string }> = []
+    const fileWarnings: Array<{ line: number; character: number; message: string; source: string; code?: string }> = []
     for (const [file, issues] of Object.entries(diagnostics)) {
       const errors = issues.filter((item) => item.severity === 1)
+      const warnings = issues.filter((item) => item.severity === 2)
+      if (file === normalizedFilepath) {
+        fileErrorCount = errors.length
+        fileWarningCount = warnings.length
+        for (const d of errors.slice(0, MAX_DIAGNOSTICS_PER_FILE)) {
+          fileErrors.push({
+            line: d.range?.start?.line ?? 0,
+            character: d.range?.start?.character ?? 0,
+            message: d.message ?? "",
+            source: d.source ?? "lsp",
+            code: typeof d.code === "string" || typeof d.code === "number" ? String(d.code) : undefined,
+          })
+        }
+        for (const d of warnings.slice(0, MAX_DIAGNOSTICS_PER_FILE)) {
+          fileWarnings.push({
+            line: d.range?.start?.line ?? 0,
+            character: d.range?.start?.character ?? 0,
+            message: d.message ?? "",
+            source: d.source ?? "lsp",
+            code: typeof d.code === "string" || typeof d.code === "number" ? String(d.code) : undefined,
+          })
+        }
+      }
       if (errors.length === 0) continue
       const limited = errors.slice(0, MAX_DIAGNOSTICS_PER_FILE)
       const suffix =
@@ -71,10 +98,19 @@ export const WriteTool = Tool.define("write", {
       output += `\n\nLSP errors detected in other files:\n<diagnostics file="${file}">\n${limited.map(LSP.Diagnostic.pretty).join("\n")}${suffix}\n</diagnostics>`
     }
 
+    const diagnosticsSummary = {
+      file: filepath,
+      errorCount: fileErrorCount,
+      warningCount: fileWarningCount,
+      errors: fileErrors,
+      warnings: fileWarnings,
+    }
+
     return {
       title: path.relative(Instance.worktree, filepath),
       metadata: {
         diagnostics,
+        diagnosticsSummary,
         filepath,
         exists: exists,
       },

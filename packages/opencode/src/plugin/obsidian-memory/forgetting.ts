@@ -27,3 +27,7 @@ export function tokenEstimate(text: string): number {
   if (!text) return 0
   return Math.ceil(text.length / 4)
 }
+
+export function staleEntries(entries: MemoryEntry[], retentionDays?: number, now?: number): MemoryEntry[] {
+  return entries.filter((e) => isExpired(e, now) || isStale(e, retentionDays, now))
+}

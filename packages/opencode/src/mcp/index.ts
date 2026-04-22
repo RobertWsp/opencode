@@ -187,6 +187,53 @@ export namespace MCP {
     clients: Record<string, MCPClient>
     timers: Record<string, ReturnType<typeof setTimeout>>
     debounce?: ReturnType<typeof setTimeout>
+    /** Circuit breaker per MCP — failure timestamps + cooldown expiry. */
+    circuit: Record<string, { failures: number[]; blockedUntil: number }>
+  }
+
+  // Circuit breaker tuning — blocks reconnect attempts when an MCP has
+  // been failing to connect repeatedly. Prevents cascade delays where a
+  // single broken MCP adds ~30s timeout to every turn.
+  //
+  // Defaults: 3 failures within 60s → block for 5 min.
+  // Override via env: OPENCODE_MCP_CIRCUIT_{THRESHOLD,WINDOW_MS,COOLDOWN_MS}
+  const CB_FAILURE_THRESHOLD = Number(process.env.OPENCODE_MCP_CIRCUIT_THRESHOLD ?? 3)
+  const CB_FAILURE_WINDOW_MS = Number(process.env.OPENCODE_MCP_CIRCUIT_WINDOW_MS ?? 60_000)
+  const CB_COOLDOWN_MS = Number(process.env.OPENCODE_MCP_CIRCUIT_COOLDOWN_MS ?? 5 * 60_000)
+
+  function circuitState(s: Store, name: string) {
+    if (!s.circuit[name]) s.circuit[name] = { failures: [], blockedUntil: 0 }
+    return s.circuit[name]
+  }
+
+  function isCircuitOpen(s: Store, name: string): boolean {
+    const c = s.circuit[name]
+    if (!c) return false
+    return Date.now() < c.blockedUntil
+  }
+
+  function recordCircuitFailure(s: Store, name: string) {
+    const c = circuitState(s, name)
+    const now = Date.now()
+    // Drop failures outside the window
+    c.failures = c.failures.filter((t) => now - t < CB_FAILURE_WINDOW_MS)
+    c.failures.push(now)
+    if (c.failures.length >= CB_FAILURE_THRESHOLD) {
+      c.blockedUntil = now + CB_COOLDOWN_MS
+      log.warn("MCP circuit breaker tripped", {
+        name,
+        failures: c.failures.length,
+        blockedFor: `${Math.round(CB_COOLDOWN_MS / 1000)}s`,
+      })
+      c.failures = []
+    }
+  }
+
+  function recordCircuitSuccess(s: Store, name: string) {
+    const c = s.circuit[name]
+    if (!c) return
+    c.failures = []
+    c.blockedUntil = 0
   }
 
   function clearTimer(s: Store, name: string) {
@@ -288,6 +335,7 @@ export namespace MCP {
       clients,
       timers,
       debounce: undefined as ReturnType<typeof setTimeout> | undefined,
+      circuit: {} as Record<string, { failures: number[]; blockedUntil: number }>,
     }
   }
 
@@ -667,19 +715,38 @@ export namespace MCP {
       return
     }
 
-    const result = await create(name, { ...mcp, enabled: true })
+    const s = await state()
 
-    if (!result) {
-      const s = await state()
+    // Circuit breaker — skip reconnect attempts if MCP has been failing.
+    // Returning "failed" status here without actually calling create() avoids
+    // the 20-30s connect timeout that would otherwise block the caller.
+    if (isCircuitOpen(s, name)) {
+      const remainingSec = Math.round((s.circuit[name]!.blockedUntil - Date.now()) / 1000)
+      log.info("MCP circuit open, skipping connect", { name, remainingSec })
       s.status[name] = {
         status: "failed",
-        error: "Unknown error during connection",
+        error: `circuit_breaker_open_${remainingSec}s`,
       }
       return
     }
 
-    const s = await state()
+    const result = await create(name, { ...mcp, enabled: true })
+
+    if (!result) {
+      s.status[name] = {
+        status: "failed",
+        error: "Unknown error during connection",
+      }
+      recordCircuitFailure(s, name)
+      return
+    }
+
     s.status[name] = result.status
+    if (result.status.status === "failed") {
+      recordCircuitFailure(s, name)
+    } else if (result.status.status === "connected") {
+      recordCircuitSuccess(s, name)
+    }
     if (result.mcpClient) {
       // Close existing client if present to prevent memory leaks
       const prev = s.clients[name]
@@ -776,6 +843,17 @@ export namespace MCP {
             return { tools: listed.tools.map((tool) => tool.name) }
           }
 
+          // Circuit breaker — skip reconnect attempts when MCP has been failing.
+          // Same policy as the explicit connect() path; here prevents the 20-30s
+          // timeout on every gateway activation request when MCP is broken.
+          if (isCircuitOpen(now, name)) {
+            const remaining = Math.round((now.circuit[name]!.blockedUntil - Date.now()) / 1000)
+            return {
+              tools: [],
+              error: `[CIRCUIT OPEN] MCP '${name}' blocked after recent failures. Retry in ~${remaining}s or fix the underlying MCP.`,
+            }
+          }
+
           let pending = activating.get(name)
           if (!pending) {
             pending = (async () => {
@@ -783,6 +861,11 @@ export namespace MCP {
               const cfg = await Config.get()
               const latest = await state()
               latest.status[name] = created.status
+              if (created.status.status === "failed") {
+                recordCircuitFailure(latest, name)
+              } else if (created.status.status === "connected") {
+                recordCircuitSuccess(latest, name)
+              }
               if (!created.mcpClient) {
                 if (created.status.status === "needs_auth")
                   return {

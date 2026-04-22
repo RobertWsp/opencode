@@ -149,6 +149,37 @@ export namespace Agent {
             websearch: "allow",
             codesearch: "allow",
             read: "allow",
+            // MCP + skill tooling must survive the `*:deny` above, otherwise
+            // PermissionNext.disabled() (in session/llm.ts resolveTools) strips
+            // them at stream time — explore ends up with 5 tools instead of
+            // having access to skill_search, the obsidian vault, and every
+            // mcp_activate_* gateway. These patterns mirror the baseline allows
+            // in oh-my-opencode/src/shared/permission-compat.ts.
+            skill: "allow",
+            skill_search: "allow",
+            "mcp_activate_*": "allow",
+            "mcp__*": "allow",
+            "obsidian-memory_*": "allow",
+            "obsidian_memory_*": "allow",
+            "mcp-ops_*": "allow",
+            "mcp_ops_*": "allow",
+            "mcp-adb_*": "allow",
+            "mcp_adb_*": "allow",
+            "multi-ai-orchestrator_*": "allow",
+            "multi_ai_orchestrator_*": "allow",
+            "sequential-thinking_*": "allow",
+            "sequential_thinking_*": "allow",
+            "mcp-chrome_*": "allow",
+            "mcp_chrome_*": "allow",
+            "grafana_*": "allow",
+            "sentry_*": "allow",
+            "context7_*": "allow",
+            "github_*": "allow",
+            "shadcn-ui_*": "allow",
+            "shadcn_ui_*": "allow",
+            "skillsmp_*": "allow",
+            "grep-app_*": "allow",
+            "grep_app_*": "allow",
             external_directory: {
               "*": "ask",
               ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),

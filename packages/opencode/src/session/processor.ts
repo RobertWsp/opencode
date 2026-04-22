@@ -18,6 +18,49 @@ import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { CONFABULATION_PATTERN, CONFABULATION_QUARANTINE_NOTICE } from "./constants"
 import { RouterNotifications } from "./router-notifications"
+import { defer } from "@/util/defer"
+
+/**
+ * Parse a Claude Code subscription-cap reset time out of the human-readable
+ * error message ("You've hit your limit · resets 5pm (America/Sao_Paulo)").
+ * Returns the reset timestamp in ms, or null if the shape doesn't match.
+ * Inline implementation (mirrors oh-my-opencode/parseResetAt) so we don't
+ * need a cross-package dependency.
+ */
+function parseClaudeCodeResetAt(msg: string, now = Date.now()): number | null {
+  const m = msg.match(/resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?/i)
+  if (!m) return null
+  const [, hh, mm, ampm, tz] = m
+  let hour = parseInt(hh, 10)
+  const minute = mm ? parseInt(mm, 10) : 0
+  if (ampm.toLowerCase() === "pm" && hour < 12) hour += 12
+  if (ampm.toLowerCase() === "am" && hour === 12) hour = 0
+  const target = tz ? tz.trim() : Intl.DateTimeFormat().resolvedOptions().timeZone
+  const ref = new Date(now)
+  try {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: target,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+    const parts = Object.fromEntries(fmt.formatToParts(ref).map((p) => [p.type, p.value]))
+    const year = Number(parts.year)
+    const month = Number(parts.month)
+    const day = Number(parts.day)
+    const asIfUtc = Date.UTC(year, month - 1, day, hour, minute)
+    const tzClockAsUtc = Date.UTC(year, month - 1, day, Number(parts.hour), Number(parts.minute))
+    const offset = tzClockAsUtc - ref.getTime()
+    let resetAt = asIfUtc - offset
+    if (resetAt <= now) resetAt += 24 * 60 * 60 * 1000
+    return resetAt
+  } catch {
+    return null
+  }
+}
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -64,6 +107,60 @@ export namespace SessionProcessor {
     }
   }
 
+  // Queue of pending Meridian wait notifications keyed by sessionID.
+  // Populated by the __meridianNotifyWait global that the Meridian plugin
+  // invokes when it enters an extended wait (>30s). Drained at the start
+  // of each process() iteration so the user sees "waiting for reset in 3h"
+  // instead of a silent hang.
+  const meridianWaitQueue = new Map<string, string[]>()
+
+  // Register once on module load so the Meridian plugin can call us.
+  ;(() => {
+    const reg = globalThis as {
+      __meridianNotifyWait?: (info: {
+        sessionID: string
+        reason: string
+        profile: string
+        resetAt: number
+        waitHuman: string
+      }) => void
+    }
+    if (typeof reg.__meridianNotifyWait === "function") return
+    reg.__meridianNotifyWait = (info) => {
+      try {
+        const icon =
+          info.reason === "rate_limit"
+            ? "⏳"
+            : info.reason === "weekly_limit"
+              ? "📅"
+              : info.reason === "auth_expired"
+                ? "🔑"
+                : "⏱️"
+        const text = `${icon} Aguardando reset do Meridian (${info.reason}) — próximo disponível em ${info.waitHuman}. A sessão retomará automaticamente.`
+        const list = meridianWaitQueue.get(info.sessionID) ?? []
+        list.push(text)
+        meridianWaitQueue.set(info.sessionID, list)
+      } catch {}
+    }
+  })()
+
+  async function drainMeridianWaitNotifications(msg: MessageV2.Assistant, sessionID: string) {
+    const pending = meridianWaitQueue.get(sessionID)
+    if (!pending || pending.length === 0) return
+    meridianWaitQueue.delete(sessionID)
+    for (const text of pending) {
+      await Session.updatePart({
+        id: Identifier.ascending("part"),
+        messageID: msg.id,
+        sessionID,
+        type: "text",
+        text,
+        ignored: true,
+        synthetic: true,
+      })
+    }
+  }
+
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
@@ -93,16 +190,110 @@ export namespace SessionProcessor {
         // conversation history before the assistant's reply — same UX as
         // account switch notifications.
         await drainRouterNotifications(input.assistantMessage, input.sessionID)
+        await drainMeridianWaitNotifications(input.assistantMessage, input.sessionID)
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         let switches = 0
         while (true) {
+          // Drain Meridian wait notifications that may have been enqueued
+          // between iterations (e.g. after a 429-triggered wait resolved).
+          await drainMeridianWaitNotifications(input.assistantMessage, input.sessionID)
           const usedAccount = (await Provider.getPool(input.model.providerID))?.stats().activeIndex
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+            // Flag set in text-end when we detect that the ONLY content of
+            // the assistant response is a Claude Code subprocess error like
+            // "You've hit your limit". Meridian wraps that as a normal HTTP
+            // 200 response so it never triggers the APIError path — we have
+            // to sniff the body and synthesize a 429 after the stream ends.
+            let meridianLimitHitText: string | undefined
+            let otherContentEmitted = false
             const stream = await LLM.stream(streamInput)
 
+            const idleTimeoutMs = (await Config.get()).experimental?.stream_idle_timeout_ms ?? 300_000
+            let watchdogTimer: ReturnType<typeof setTimeout> | undefined
+            let watchdogTripped = false
+            const watchdog = new AbortController()
+            // Count of tool calls whose execution is currently in flight.
+            // The stream legitimately goes quiet between `tool-call` (model
+            // finished emitting the call) and the corresponding `tool-result`
+            // (tool finished executing locally). A bash script or MCP call
+            // can easily take >90s; rearming the watchdog on those events is
+            // correct, but we must also NOT let the timer fire in the quiet
+            // interval. We disarm while any tool is executing and rearm only
+            // when the counter returns to zero.
+            let toolsInFlight = 0
+            // Count of active reasoning blocks. Opus 4.7 with extended thinking
+            // (especially in planner agents like Prometheus) can stay in a
+            // single reasoning block for minutes. Providers that buffer SSE
+            // through a subprocess (Meridian → `claude --thinking adaptive`)
+            // can produce gaps between `reasoning-delta` events that exceed
+            // the idle timeout even when the model is actively thinking.
+            // Disarm the watchdog between `reasoning-start` and `reasoning-end`
+            // — same pattern as toolsInFlight. Deltas still rearm while thinking
+            // is active so a truly dead stream is still caught on the next
+            // non-thinking event.
+            let thinkingInFlight = 0
+            const armWatchdog = () => {
+              if (watchdogTimer) clearTimeout(watchdogTimer)
+              if (toolsInFlight > 0 || thinkingInFlight > 0) {
+                // Tool executing locally or reasoning block open — stream
+                // idle is expected. Do not arm a fresh timer. The next
+                // tool-result / reasoning-end / text event will rearm.
+                watchdogTimer = undefined
+                return
+              }
+              watchdogTimer = setTimeout(() => {
+                watchdogTripped = true
+                watchdog.abort()
+              }, idleTimeoutMs)
+            }
+            const disarmWatchdog = () => {
+              if (watchdogTimer) {
+                clearTimeout(watchdogTimer)
+                watchdogTimer = undefined
+              }
+            }
+            armWatchdog()
+            const onAbort = () => watchdog.abort()
+            input.abort.addEventListener("abort", onAbort, { once: true })
+            using _stopWatchdog = defer(() => {
+              if (watchdogTimer) clearTimeout(watchdogTimer)
+              input.abort.removeEventListener("abort", onAbort)
+            })
+
             for await (const value of stream.fullStream) {
+              if (watchdogTripped) {
+                throw new MessageV2.APIError({
+                  message: `LLM stream idle for ${idleTimeoutMs / 1000}s — aborting and retrying`,
+                  statusCode: 429,
+                  responseHeaders: {},
+                  responseBody: "stream_idle_timeout",
+                  isRetryable: true,
+                })
+              }
+              // Track tool + reasoning lifecycle BEFORE rearming so the arm
+              // logic sees the current in-flight counts. tool-call → tool is
+              // about to run locally (disarm). tool-result / tool-error → tool
+              // done (maybe rearm if nothing else pending). reasoning-start →
+              // model entered a thinking block; provider may be silent for
+              // minutes (disarm). reasoning-end → thinking block closed
+              // (maybe rearm if nothing else pending).
+              if (value.type === "tool-call") {
+                toolsInFlight++
+                disarmWatchdog()
+              } else if (value.type === "tool-result" || value.type === "tool-error") {
+                toolsInFlight = Math.max(0, toolsInFlight - 1)
+                armWatchdog()
+              } else if (value.type === "reasoning-start") {
+                thinkingInFlight++
+                disarmWatchdog()
+              } else if (value.type === "reasoning-end") {
+                thinkingInFlight = Math.max(0, thinkingInFlight - 1)
+                armWatchdog()
+              } else {
+                armWatchdog()
+              }
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -133,13 +324,37 @@ export namespace SessionProcessor {
                     const part = reasoningMap[value.id]
                     part.text += value.text
                     if (value.providerMetadata) part.metadata = value.providerMetadata
-                    await Session.updatePartDelta({
-                      sessionID: part.sessionID,
-                      messageID: part.messageID,
-                      partID: part.id,
-                      field: "text",
-                      delta: value.text,
-                    })
+                    // Meridian subprocess errors can arrive inside a reasoning
+                    // block too (opus-4-7 with thinking enabled). Same patterns
+                    // as text-delta; set the shared flag so the synth-429 path
+                    // at stream end triggers a reassign+retry. Clear the
+                    // reasoning part so the UI doesn't render the error.
+                    if (
+                      !meridianLimitHitText &&
+                      (/^\s*(?:claude code returned|you['']?ve hit|your organization does not have|please login again|custom betas are only)/i.test(
+                        part.text,
+                      ) ||
+                        /Claude Code returned an error result/i.test(part.text) ||
+                        /organization\s+does\s+not\s+have\s+access/i.test(part.text) ||
+                        /contact\s+your\s+administrator/i.test(part.text))
+                    ) {
+                      meridianLimitHitText = part.text
+                      part.text = ""
+                      await Session.updatePart({
+                        ...part,
+                        text: "",
+                        time: { start: part.time?.start ?? Date.now() },
+                      })
+                    }
+                    if (!meridianLimitHitText) {
+                      await Session.updatePartDelta({
+                        sessionID: part.sessionID,
+                        messageID: part.messageID,
+                        partID: part.id,
+                        field: "text",
+                        delta: value.text,
+                      })
+                    }
                   }
                   break
 
@@ -147,6 +362,28 @@ export namespace SessionProcessor {
                   if (value.id in reasoningMap) {
                     const part = reasoningMap[value.id]
                     part.text = part.text.trimEnd()
+                    // Mirror text-end detection: if reasoning block turned out
+                    // to be a wrapped subprocess error, suppress the part and
+                    // flag so the stream end synth-429 path fires.
+                    if (
+                      !meridianLimitHitText &&
+                      (/Claude Code returned an error result/i.test(part.text) ||
+                        /You['']?ve hit your limit.*resets?\s+\d/i.test(part.text) ||
+                        /organization\s+does\s+not\s+have\s+access/i.test(part.text) ||
+                        /contact\s+your\s+administrator/i.test(part.text))
+                    ) {
+                      meridianLimitHitText = part.text
+                    }
+                    if (meridianLimitHitText) {
+                      part.text = ""
+                      await Session.updatePart({
+                        ...part,
+                        text: "",
+                        time: { start: part.time?.start ?? Date.now(), end: Date.now() },
+                      })
+                      delete reasoningMap[value.id]
+                      break
+                    }
 
                     part.time = {
                       ...part.time,
@@ -182,6 +419,7 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-call": {
+                  otherContentEmitted = true
                   const match = toolcalls[value.toolCallId]
                   if (match) {
                     const part = await Session.updatePart({
@@ -277,8 +515,45 @@ export namespace SessionProcessor {
                   }
                   break
                 }
-                case "error":
+                case "error": {
+                  // Meridian wraps Claude Code CLI subprocess errors in SSE
+                  // `event: error` frames with body:
+                  //   {type:"error", error:{type:"api_error", message:"..."}}
+                  // Note there is NO `error.code`, so ProviderError.parseStreamError
+                  // returns undefined → MessageV2.fromError falls through to
+                  // NamedError.Unknown, which the catch-block rotation logic
+                  // DOES NOT handle (it only runs for APIError). Detect the
+                  // Meridian patterns here and synthesize a 429 APIError so
+                  // the catch block runs the reassign+retry path.
+                  const rawErr = value.error as any
+                  const errText =
+                    typeof rawErr === "string"
+                      ? rawErr
+                      : typeof rawErr?.error?.message === "string"
+                        ? rawErr.error.message
+                        : typeof rawErr?.message === "string"
+                          ? rawErr.message
+                          : JSON.stringify(rawErr)
+                  const isMeridianSubprocessError =
+                    /Claude Code returned an error result/i.test(errText) ||
+                    /organization\s+does\s+not\s+have\s+access/i.test(errText) ||
+                    /you['']?ve hit your limit/i.test(errText) ||
+                    /contact\s+your\s+administrator/i.test(errText) ||
+                    /no\s+active\s+(?:claude\s+)?subscription/i.test(errText) ||
+                    /subscription\s+required/i.test(errText) ||
+                    /please\s+login\s+again/i.test(errText)
+                  if (isMeridianSubprocessError) {
+                    meridianLimitHitText = errText
+                    throw new MessageV2.APIError({
+                      message: errText,
+                      statusCode: 429,
+                      responseHeaders: {},
+                      responseBody: errText,
+                      isRetryable: true,
+                    })
+                  }
                   throw value.error
+                }
 
                 case "start-step":
                   snapshot = await Snapshot.track()
@@ -356,20 +631,76 @@ export namespace SessionProcessor {
                 case "text-delta":
                   if (currentText) {
                     currentText.text += value.text
+                    // Early detection of Meridian subprocess errors. Covers
+                    // rate-limit ("You've hit your limit"), no-subscription
+                    // ("organization does not have access"), auth errors, and
+                    // subprocess-wrapped errors ("Claude Code returned an
+                    // error result..."). Check the accumulated text with
+                    // ^-anchored patterns (cheap) AND a few mid-text markers
+                    // (Meridian sometimes appends stderr before the delta is
+                    // flushed, pushing total past any reasonable prefix-only
+                    // guard). No length gate — the regex is O(1) on mismatch
+                    // because every alternation is anchored.
+                    if (
+                      !meridianLimitHitText &&
+                      (/^\s*(?:claude code returned|you['']?ve hit|your organization does not have|please login again|custom betas are only)/i.test(
+                        currentText.text,
+                      ) ||
+                        /Claude Code returned an error result/i.test(currentText.text) ||
+                        /organization\s+does\s+not\s+have\s+access/i.test(currentText.text) ||
+                        /contact\s+your\s+administrator/i.test(currentText.text))
+                    ) {
+                      meridianLimitHitText = currentText.text
+                      currentText.text = ""
+                      await Session.updatePart({
+                        ...currentText,
+                        text: "",
+                        time: { start: currentText.time?.start ?? Date.now() },
+                      })
+                    }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePartDelta({
-                      sessionID: currentText.sessionID,
-                      messageID: currentText.messageID,
-                      partID: currentText.id,
-                      field: "text",
-                      delta: value.text,
-                    })
+                    // Gate the delta send on detection AFTER the check above,
+                    // so a match on the current accumulated buffer suppresses
+                    // THIS delta too (not just subsequent ones).
+                    if (!meridianLimitHitText) {
+                      await Session.updatePartDelta({
+                        sessionID: currentText.sessionID,
+                        messageID: currentText.messageID,
+                        partID: currentText.id,
+                        field: "text",
+                        delta: value.text,
+                      })
+                    }
                   }
                   break
 
                 case "text-end":
                   if (currentText) {
                     currentText.text = currentText.text.trimEnd()
+                    // Detect Meridian wrapping a Claude Code subprocess
+                    // error as if it were a normal assistant response.
+                    if (
+                      !meridianLimitHitText &&
+                      (/Claude Code returned an error result/i.test(currentText.text) ||
+                        /You['']?ve hit your limit.*resets?\s+\d/i.test(currentText.text) ||
+                        /organization\s+does\s+not\s+have\s+access/i.test(currentText.text) ||
+                        /contact\s+your\s+administrator/i.test(currentText.text))
+                    ) {
+                      meridianLimitHitText = currentText.text
+                    }
+                    // If flagged as subprocess-limit text, don't persist
+                    // it to the session — the retry below will surface a
+                    // clean status message instead.
+                    if (meridianLimitHitText) {
+                      currentText.text = ""
+                      await Session.updatePart({
+                        ...currentText,
+                        text: "",
+                        time: { start: currentText.time?.start ?? Date.now(), end: Date.now() },
+                      })
+                      currentText = undefined
+                      break
+                    }
                     const textOutput = await Plugin.trigger(
                       "experimental.text.complete",
                       {
@@ -420,6 +751,25 @@ export namespace SessionProcessor {
               }
               if (needsCompaction) break
             }
+
+            // Stream finished without an APIError, but Meridian wrapped a
+            // Claude Code CLI subprocess error as a normal text response
+            // ("You've hit your limit · resets 5pm"). Promote it to a
+            // synthesized 429 so the rotation code below kicks in and
+            // rotates to another account instead of showing the error.
+            if (meridianLimitHitText && !otherContentEmitted) {
+              log.warn("meridian subprocess limit hit detected in text response; synthesizing 429", {
+                sessionID: input.sessionID,
+                textSample: meridianLimitHitText.slice(0, 200),
+              })
+              throw new MessageV2.APIError({
+                message: meridianLimitHitText,
+                statusCode: 429,
+                responseHeaders: {},
+                responseBody: meridianLimitHitText,
+                isRetryable: true,
+              })
+            }
           } catch (e: any) {
             log.error("process", {
               error: e,
@@ -449,16 +799,152 @@ export namespace SessionProcessor {
                   break
                 }
                 const pool = await Provider.getPool(input.model.providerID)
+                // Claude Code CLI subprocess errors ("You've hit your limit ·
+                // resets 5pm") come through Meridian with arbitrary status
+                // codes (often 500) because the subprocess exited non-zero.
+                // Normalize them to the 429-rotate path so the pool cools
+                // down the current account and rotates.
+                const bodyText =
+                  typeof error.data.responseBody === "string" ? error.data.responseBody : ""
+                const rawMsg = (error as { message?: string }).message ?? ""
+                const claudeCodeLimitHit =
+                  /hit\s+your\s+limit/i.test(bodyText) ||
+                  /hit\s+your\s+limit/i.test(rawMsg) ||
+                  /you['']?ve\s+hit/i.test(bodyText) ||
+                  /you['']?ve\s+hit/i.test(rawMsg)
+                // Broader: any Claude Code subprocess error that Meridian wrapped
+                // (no_subscription, auth_expired, custom-beta warning, etc.) —
+                // classifier in the Meridian plugin already cools the profile
+                // correctly; we just need to trigger the rotate+retry path.
+                const claudeCodeSubprocessError =
+                  /Claude Code returned an error result/i.test(bodyText) ||
+                  /Claude Code returned an error result/i.test(rawMsg) ||
+                  /organization\s+does\s+not\s+have\s+access/i.test(bodyText) ||
+                  /organization\s+does\s+not\s+have\s+access/i.test(rawMsg) ||
+                  /contact\s+your\s+administrator/i.test(bodyText) ||
+                  /contact\s+your\s+administrator/i.test(rawMsg) ||
+                  /no\s+active\s+(?:claude\s+)?subscription/i.test(bodyText) ||
+                  /subscription\s+required/i.test(bodyText)
+                const normalizedStatus =
+                  error.data.statusCode === 429 || claudeCodeLimitHit || claudeCodeSubprocessError
+                    ? 429
+                    : error.data.statusCode
                 if (pool) {
                   const faulted = usedAccount ?? pool.stats().activeIndex
                   const maxSwitches = Math.max(pool.stats().accountCount * 2, 3)
-                  if (error.data.statusCode === 429) {
+                  // Detect Meridian routing: process.env.ANTHROPIC_BASE_URL
+                  // is set by the opencode wrapper when routing through the
+                  // Meridian proxy. When active, the pool's own rotation is
+                  // ineffective — every "account" in the opencode pool hits
+                  // the SAME subprocess backed by one Meridian profile. The
+                  // right rotation is at the Meridian profile level via
+                  // __meridianReassign. So: single-shot reassign + cooldown
+                  // the current pool slot for retryAfterMs, and skip the
+                  // cascading pool.next() dance that was producing the
+                  // "Account switched → #1 → #2 → #3" chain you saw.
+                  const meridianActive =
+                    (process.env.ANTHROPIC_BASE_URL ?? "").includes("127.0.0.1:3456") ||
+                    typeof (globalThis as { __meridianReassign?: unknown }).__meridianReassign ===
+                      "function"
+                  if (normalizedStatus === 429) {
                     const parsed = error.data.responseHeaders?.["retry-after-ms"]
                       ? Number.parseFloat(error.data.responseHeaders["retry-after-ms"])
                       : error.data.responseHeaders?.["retry-after"]
                         ? Number.parseFloat(error.data.responseHeaders["retry-after"]) * 1000
                         : 60_000
-                    const retryAfterMs = Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000
+                    let retryAfterMs = Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000
+
+                    // For Claude Code subscription-cap errors, extract a real
+                    // reset time from the message text and use that instead of
+                    // the fallback 60s — this surfaces "resets in 4h" to the UI.
+                    if (claudeCodeLimitHit) {
+                      const combined = `${rawMsg} ${bodyText}`
+                      const resetAt = parseClaudeCodeResetAt(combined)
+                      if (resetAt && resetAt > Date.now()) {
+                        retryAfterMs = resetAt - Date.now()
+                        const kind = /weekly/i.test(combined) ? "weekly" : "5h"
+                        pool.markSessionLimit(faulted, kind, resetAt)
+                      }
+                    }
+
+                    // Meridian path: forward to the profile rotator and let
+                    // it wait/retry. No pool rotation (would just produce
+                    // "Account switched → #N" spam without actually going
+                    // to a different profile).
+                    if (meridianActive) {
+                      // Returned profile from reassign (null = all in cooldown,
+                      // wait in chat.headers will resolve). Track successful
+                      // switches separately from attempts so an all-cooldown
+                      // loop doesn't consume the switch budget — the plugin's
+                      // waitForHealthyProfile is the real backstop.
+                      let reassignedTo: string | null = null
+                      try {
+                        const reg = globalThis as {
+                          __meridianReassign?: (
+                            sid: string,
+                            reason?: string,
+                            untilOverride?: number,
+                          ) => string | null
+                        }
+                        const combined = `${rawMsg} ${bodyText}`
+                        const noSubscription =
+                          /organization\s+does\s+not\s+have\s+access/i.test(combined) ||
+                          /no\s+active\s+(?:claude\s+)?subscription/i.test(combined) ||
+                          /subscription\s+required/i.test(combined) ||
+                          /contact\s+your\s+administrator/i.test(combined)
+                        const reason = noSubscription
+                          ? "no_subscription"
+                          : claudeCodeLimitHit
+                            ? /weekly/i.test(combined)
+                              ? "weekly_limit"
+                              : "rate_limit"
+                            : "rate_limit"
+                        const realResetAt = claudeCodeLimitHit
+                          ? parseClaudeCodeResetAt(combined)
+                          : null
+                        reassignedTo =
+                          reg.__meridianReassign?.(
+                            input.sessionID,
+                            reason,
+                            realResetAt ?? undefined,
+                          ) ?? null
+                        log.info("meridian reassign on 429", {
+                          sessionID: input.sessionID,
+                          reason,
+                          newProfile: reassignedTo ?? "(none — wait will resolve)",
+                          resetAt: realResetAt
+                            ? new Date(realResetAt).toISOString()
+                            : "(default cooldown)",
+                        })
+                      } catch (err) {
+                        log.warn("meridian reassign threw", { error: String(err) })
+                      }
+                      // On Meridian path, let the plugin's waitForHealthyProfile
+                      // (invoked by chat.headers on the next LLM.stream) act as
+                      // the real backstop. Only count a "switch" when we actually
+                      // rotated to a different profile; otherwise the wait is
+                      // doing the work. Hard ceiling of 50 protects against
+                      // pathological retry loops but still allows hours of
+                      // rate_limit recovery.
+                      const meridianMaxSwitches = 50
+                      if (reassignedTo) switches++
+                      if (switches < meridianMaxSwitches) {
+                        // Respect user abort BEFORE looping back. Without this,
+                        // Ctrl+C during a reassign cycle only takes effect once
+                        // the next LLM.stream() runs its own abort check.
+                        input.abort.throwIfAborted()
+                        continue
+                      }
+                      log.warn("meridian: exhausted retries after meridianMaxSwitches", {
+                        sessionID: input.sessionID,
+                        switches,
+                      })
+                      input.assistantMessage.error = error
+                      Bus.publish(Session.Event.Error, { sessionID: input.sessionID, error })
+                      input.assistantMessage.time.completed = Date.now()
+                      await Session.updateMessage(input.assistantMessage)
+                      return "stop"
+                    }
 
                     const exhausted = isAccountExhausted(retryAfterMs, error.data.responseBody)
                     // Always use cooldown for 429s — even exhausted accounts recover

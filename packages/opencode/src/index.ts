@@ -49,8 +49,26 @@ process.on("uncaughtException", (e) => {
 
 // Ensure the process exits on terminal hangup (eg. closing the terminal tab).
 // Without this, long-running commands like `serve` block on a never-resolving
-// promise and survive as orphaned processes.
-process.on("SIGHUP", () => process.exit())
+// promise and survive as orphaned processes. The brief grace window lets
+// pending DB writes flush before exit so an in-flight assistant message
+// isn't truncated mid-write.
+process.on("SIGHUP", () => {
+  process.exitCode = 0
+  setTimeout(() => process.exit(), 500)
+})
+
+// Same grace window for Ctrl+C (SIGINT) and systemd/docker stop (SIGTERM).
+// Without this, plugins with pending work (e.g. Meridian's scheduleDiskWrite
+// debounce, any pending fs.writeFile) get killed instantly and lose state —
+// the next startup re-observes a stale cache and can repeat the failure.
+// Plugins register their own handlers for the same signals; this grace
+// window gives them time to run synchronously before we hard-exit.
+const gracefulExit = () => {
+  process.exitCode = 130 // conventional exit code for SIGINT
+  setTimeout(() => process.exit(), 500)
+}
+process.on("SIGINT", gracefulExit)
+process.on("SIGTERM", gracefulExit)
 
 let cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })
